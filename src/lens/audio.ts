@@ -1,14 +1,4 @@
-/**
- * Voice capture on the glasses.
- *
- * The Even SDK does **not** provide speech recognition — `audioControl` only
- * streams raw PCM from the four-mic array (16 kHz, signed 16-bit LE, mono).
- * Transcription therefore happens server-side, through Okou's existing
- * `/api/voice-io/stt`, which already carries this user's auth and quota.
- *
- * Frames are buffered rather than streamed because that endpoint transcribes a
- * complete recording in one request.
- */
+/** Capture bounded 16 kHz mono PCM from the G2 microphone. */
 import { AudioInputSource, type EvenAppBridge } from '@evenrealities/even_hub_sdk'
 
 import { AUDIO_SAMPLE_RATE, MAX_RECORDING_SECONDS } from '../config'
@@ -77,7 +67,6 @@ export interface Recorder {
  */
 export async function startRecording(
   bridge: EvenAppBridge,
-  onLevel?: (seconds: number) => void,
 ): Promise<Recorder> {
   const chunks: Uint8Array[] = []
   let total = 0
@@ -91,34 +80,36 @@ export async function startRecording(
     // Stop accumulating past the cap; the recorder still has to be stopped by
     // the caller, but memory stays bounded.
     if (total >= MAX_BYTES) return
-    chunks.push(bytes)
-    total += bytes.byteLength
-    onLevel?.(total / (AUDIO_SAMPLE_RATE * BYTES_PER_SAMPLE))
+    const chunk = bytes.slice(0, MAX_BYTES - total)
+    chunks.push(chunk)
+    total += chunk.byteLength
   })
 
-  const started = await bridge.audioControl(true, AudioInputSource.Glasses)
-  if (!started) {
+  try {
+    if (!await bridge.audioControl(true, AudioInputSource.Glasses)) throw new Error('The glasses microphone did not start')
+  } catch (error) {
     unsubscribe()
-    throw new Error('The glasses microphone did not start')
+    throw error
   }
 
   const teardown = async () => {
+    if (stopped) return
     stopped = true
     unsubscribe()
-    await bridge.audioControl(false)
+    if (!await bridge.audioControl(false)) throw new Error('Could not close the microphone')
   }
 
   return {
     async stop() {
       await teardown()
-      if (total === 0) return null
+      if (total < BYTES_PER_SAMPLE) return null
       const merged = new Uint8Array(total)
       let offset = 0
       for (const chunk of chunks) {
         merged.set(chunk, offset)
         offset += chunk.byteLength
       }
-      return pcmToWav(merged)
+      return pcmToWav(merged.subarray(0, total - total % BYTES_PER_SAMPLE))
     },
     async cancel() {
       await teardown()

@@ -2,16 +2,17 @@
   "package_id": "ai.okou.g2",
   "edition": "202601",
   "name": "Okou",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "min_sdk_version": "0.0.15",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "network",
-      "desc": "Signs you in to your Okou account, syncs your chats, and sends what you say.",
+      "desc": "Authorizes your device, sends private voice messages, and reads replies in your G2 conversation.",
       "whitelist": [
         "https://g2.okou.ai",
         "https://clerk.okou.ai",
+        "https://accounts.okou.ai",
         "https://api.okou.ai",
         "https://vm0-s3-user-storages-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com",
         "https://98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com",
@@ -31,7 +32,7 @@
     },
     {
       "name": "g2-microphone",
-      "desc": "Lets you dictate a chat message with the glasses microphone."
+      "desc": "Records voice messages from the glasses microphone."
     }
   ],
   "supported_languages": [

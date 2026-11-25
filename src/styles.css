@@ -47,12 +47,6 @@ header h1 {
   font-size: 1rem;
 }
 
-.card h3 {
-  margin: 1.25rem 0 0.5rem;
-  font-size: 0.875rem;
-  color: var(--muted);
-}
-
 .hint {
   margin: 0 0 0.75rem;
   color: var(--muted);
@@ -67,52 +61,12 @@ header h1 {
   line-height: 1.5;
 }
 
-dl {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.35rem 0.75rem;
-  margin: 0;
-  font-size: 0.875rem;
-}
-
-dt {
-  color: var(--muted);
-}
-
-dd {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.8125rem;
 }
 
-input {
-  width: 100%;
-  padding: 0.75rem;
-  margin-bottom: 0.75rem;
-  background: #0f1113;
-  border: 1px solid var(--line);
-  border-radius: 0.5rem;
-  color: var(--text);
-  /* 16px keeps iOS Safari from zooming the WebView on focus. */
-  font-size: 1rem;
-}
-
-input:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-input.code {
-  text-align: center;
-  letter-spacing: 0.5em;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-button {
+button, .button {
   width: 100%;
   padding: 0.75rem;
   border: 0;
@@ -137,35 +91,8 @@ button.link {
   font-size: 0.875rem;
 }
 
-.fatal {
-  padding: 2rem 1rem;
-  color: var(--danger);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.threads {
-  margin: 0 0 1rem;
-  padding: 0;
-  list-style: none;
-  font-size: 0.875rem;
-}
-
-.threads li {
-  display: flex;
-  gap: 0.75rem;
-  align-items: baseline;
-  padding: 0.5rem 0;
-  border-top: 1px solid var(--line);
-}
-
-.thread-title {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.thread-meta {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
+.button { display: block; text-align: center; text-decoration: none; }
+.device-code { font: bold 2rem ui-monospace, monospace; letter-spacing: 0.15em; text-align: center; user-select: all; }
+.verification-url { margin-top: 0.75rem; overflow-wrap: anywhere; }
+.reply { white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--line); padding-top: 1rem; line-height: 1.55; }
+p { line-height: 1.5; }

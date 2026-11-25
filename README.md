@@ -1,244 +1,44 @@
-# okou-g2
+# Okou for Even G2
 
-Okou app for the [Even Realities G2](https://hub.evenrealities.com/) glasses.
+Speak to a dedicated Okou conversation from Even G2 glasses and read replies on the lens. Open the hosted app in the Even App WebView on a phone paired with G2. The phone runs the client and the glasses provide the microphone, touch controls and display.
 
-Live at **https://g2.okou.ai** — a Cloudflare Worker that serves the SPA and
-verifies Clerk sessions.
+## Sign in and use the glasses
 
-## What it does
+1. Select **Sign in with Okou** on the phone. Open the displayed authorization page in a browser, enter the device code, choose a workspace and return to the Even App.
+2. The first sign-in creates a conversation titled **Even G2**. Opening the app again on the same installation restores that conversation. Each Okou account and workspace has its own binding.
+3. Tap the glasses to record, then tap again to send. Double-tap during capture to discard it. At the one-minute limit the microphone closes and the recording waits for a tap to send.
+4. Read committed assistant replies on the lens. Swipe forward or backward through long replies and earlier messages. Double-tap from the reader to exit. Use **Sign out** on the phone to change account or workspace.
 
-Signs you in with a Clerk email code, then keeps your Okou chat list on the
-device and on the glasses:
+## Device protocol
 
-- **Thread list** — full snapshot plus the lifecycle event tail.
-- **Chat events** — durable rows for the most recently active threads.
-- **Push updates** — an Ably subscription invalidates either sync as soon as
-  the server publishes.
+The OAuth client uses Clerk's device authorization grant and requests `openid profile offline_access user:org:read okou:chat:read okou:chat:send`. The G2 Worker exchanges grants with the production issuer at `https://clerk.okou.ai`. The short-lived access token stays in memory. The rotating refresh token is scoped to the host in a Secure, HttpOnly, SameSite=Strict cookie. Grant operations accept same-origin POSTs. The pending code is tab-local and survives a reload while approval is open.
 
-Streaming output is deliberately not handled. Partial assistant text travels on
-a separate `run-output` channel; this client only stores committed rows, so a
-turn appears once it is durable.
+IndexedDB reserves a UUID before sending `POST /api/chat-threads`. A lost creation response reuses the reservation. An established binding is replaced only when its metadata returns 404 or 410. Clearing the WebView's site data removes its local binding.
 
-You can also talk back: the compose screen records from the glasses mic and
-sends the transcript, creating the thread optimistically.
+Voice capture produces a 16 kHz mono PCM16 WAV. The same-origin Worker prepares a private upload at the Okou API, PUTs the recording to the returned R2 URL with its signed headers, and completes the upload. The private bucket requires a server-side PUT from this origin. The client sends the resulting file ID as a version-1 voice part in the bound thread, preserving its current computer host and cloud browser settings. The event IDs, file ID and target settings are saved before submission. If the result is uncertain, the client reconciles the original input or its promoted row from history. The phone's explicit retry reuses that exact request.
 
-## On the glasses
+The reader follows a signed NDJSON snapshot and paired event/sequence cursors. It keeps the 200 most recent presentation and run-lifecycle rows in memory. Ably subscriptions on `user-org:<user>:<org>` wake only the bound thread for message/detail changes. Attachment, app resume, and reconnect trigger catch-up. While realtime is unavailable the foreground app also checks every 30 seconds.
 
-```
-threads ──click item──▶ messages ──click──▶ compose ──send──▶ messages
-   ▲                        │                   │
-   └──── 2x-tap ────────────┴─── 2x-tap ────────┘
-```
+## Development
 
-| Screen | Shows | Tap | Double-tap |
-| --- | --- | --- | --- |
-| Threads | Chat list, `+ New chat` first | Open / start new | Exit the app |
-| Messages | Last 4 messages, thinking indicator | Reply by voice | Back to threads |
-| Compose | Recording state and transcript | Start, then stop and send | Cancel |
+Use the public client ID of a Clerk application with the device grant, refresh tokens, workspace selection and Okou chat scopes. Set the Worker's `OAUTH_CLIENT_ID` in `wrangler.jsonc` for deployment. For a local override, copy `.dev.vars.example` to `.dev.vars`. The production client requires no client secret.
 
-`threads` is the root page, so its double-tap goes through
-`shutDownPageContainer(1)` and the system exit confirmation, as Even requires.
-
-Markdown is stripped before anything reaches the lens: there is one font and no
-styling, so the markers would only cost characters.
-
-### Two constraints worth knowing
-
-**There is no ASR in the Even SDK.** `audioControl` streams raw PCM from the
-four-mic array (16 kHz, signed 16-bit LE, mono) and nothing more. The app wraps
-that PCM in a WAV header and posts it to Okou's own
-`POST /api/voice-io/stt`, which already carries this user's Clerk auth and
-audio quota — so no provider key ever reaches the device.
-
-**There is no text alignment.** The SDK exposes no alignment and no font
-metrics, so a user message cannot truly be right-aligned. What it does expose
-is per-container geometry, so user rows are drawn in a container inset from the
-left and assistant rows in one flush left. It reads as two columns; it is not
-exact alignment, and the platform offers nothing closer.
-
-## Architecture
-
-```
-Even G2  ──BLE──  Even App WebView  ──HTTPS──  g2.okou.ai (Cloudflare Worker)
-                         │                             └── verifies Clerk JWT
-                         ├── clerk.okou.ai    (email code sign-in)
-                         ├── api.okou.ai      (threads, chat events, Ably token)
-                         ├── *.ably.net       (push invalidation)
-                         └── Even App storage (durable cache)
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run dev
 ```
 
-### Sync protocol
-
-Both loops mirror the platform SharedWorker:
-
-| | Cold start | Tail | Cursor expired |
-| --- | --- | --- | --- |
-| Threads | `GET /api/chat-threads/snapshot` | `GET /api/chat-threads/events?sinceSeqId=` | `410` → snapshot |
-| Messages | `GET /api/chat-threads/:id/event-snapshot` | `GET /api/chat-threads/:id/event-rows?sinceSeqId=` | `410` → snapshot |
-
-Push topics on `user-org:<userId>:<orgId>`:
-
-- `threadListChanged` → resync the list
-- `chatThreadMessageCreated:<threadId>` → resync that thread
-
-Payloads are notifications, not data. Every delivery triggers a fetch, because
-the server stays authoritative.
-
-### Storage
-
-The Even App's `setLocalStorage` / `getLocalStorage` is a flat string store
-with **no key enumeration, no delete, and no documented size limit**. So:
-
-- Keys are namespaced `okou/v1/<clerkUserId>/<orgId>/…`, which is also what
-  keeps two identities from mixing.
-- Values are chunked into `<key>#<n>` with a header recording the count.
-- Removal writes a tombstone; the key stays allocated but reads as absent.
-- The namespace keeps its own thread index, since nothing can list keys.
-
-Bounds live in `src/config.ts`: 100 threads listed, messages kept for the 100
-most recently active, 200 message/lifecycle rows each. Thinking and usage rows
-still advance the server cursor but cannot evict readable history. Old message
-caches are rebuilt once to recover text they may already have dropped.
-Threads sync 4 at a time, because at this
-size a serial cold start would be hundreds of sequential round trips.
-
-Opening a conversation also fetches its latest rows. The lens distinguishes
-loading, a failed read (tap to retry), and a confirmed empty history. Native
-display failures are shown in the phone's Glasses card and do not stop later
-redraws.
-
-New sends select the member's default model, falling back to the workspace
-default, using the same preference endpoints as the web app. Replies retain
-the conversation's agent and model. The prompt appears before the send is
-acknowledged; a rejected send rolls it back and keeps the transcript for a tap
-to retry. A later history-read failure cannot turn an accepted send into a
-failed send.
-
-### Chat event snapshot archive
-
-Message snapshots are presigned R2 objects, not API responses, so they need
-their own CORS grant and their own `app.json` whitelist entry.
-
-The production bucket `vm0-s3-user-storages-prod` allows `https://*.okou.ai`
-for `GET`/`HEAD`, which covers this origin — verified by preflight, and an
-unrelated origin is rejected. The API builds S3 clients with
-`forcePathStyle` off unless `S3_FORCE_PATH_STYLE=true`, so the presigned host
-is virtual-hosted style (`<bucket>.<account>.r2.cloudflarestorage.com`). Both
-that host and the path-style one are whitelisted, because the flag is not
-visible from this repo.
-
-`syncThreadMessages` still falls back to a bounded cold start from
-`sinceSeqId=0` if the archive fetch fails for any reason.
-
-### Organization
-
-Every Okou chat API resolves its organization from the session token's
-`org_id`. A sign-in does not set one by itself, so `OrganizationGate` selects
-the only membership automatically and shows a picker when there are several.
-
-- The app code runs on the phone, not on the glasses. G2 renders text and
-  forwards touch/IMU input.
-- Sign-in happens on the phone screen with a custom Clerk email-code flow. No
-  redirect leaves the WebView, because the Even App has no reliable way back
-  from a system browser.
-- The Worker holds **no Clerk secret**. Session tokens are verified locally
-  against the public JWKS at `https://clerk.okou.ai/.well-known/jwks.json`.
-
-### What is allowed to ship in the bundle
-
-| Value | In the bundle |
-| --- | --- |
-| Clerk publishable key (`pk_live_…`) | yes — it is public by design |
-| Clerk secret key | never |
-| Okou / OpenAI API tokens | never |
-| The fixed thread ID | never — resolved server-side from the Clerk user |
-
-## Local development
-
-```bash
-npm install
-cp .env.example .env
-npm run dev          # Vite on :5173, bound to the LAN
-```
-
-For the Worker and the API together:
-
-```bash
-npm run build
-npx wrangler dev     # serves dist/ plus /api/*
-```
-
-To load the dev server on real glasses, put the phone and the computer on the
-same network and generate a QR code:
-
-```bash
-npx @evenrealities/evenhub-cli qr --url "http://192.168.x.x:5173"
-```
-
-`http://localhost:5173` is already an accepted `azp` value, so the backend check
-works in local development too.
+The development command builds the SPA and serves it with the Worker at `http://localhost:5173`. Use an HTTPS deployment when loading from a phone. Both the SPA and its Worker routes must be served from the same origin. Okou API and signed history reads must allow that origin.
 
 ## Deployment
 
-```bash
-npm run deploy       # vite build && wrangler deploy
+The Worker and Vite assets are deployed together on `g2.okou.ai`.
+
+```sh
+npm run deploy
+npx @evenrealities/evenhub-cli qr --url https://g2.okou.ai
 ```
 
-Configuration lives in `wrangler.jsonc`:
-
-| Var | Meaning |
-| --- | --- |
-| `CLERK_ISSUER` | Clerk production instance issuer (`https://clerk.okou.ai`) |
-| `ALLOWED_ORIGINS` | Accepted `azp` claim values on the session token |
-
-Any signed-in Okou account can use the app; there is no per-user allowlist.
-
-The build reads `VITE_CLERK_PUBLISHABLE_KEY` from the environment. It is the
-same public key the `vm0-ai/okou` repository stores as
-`CLERK_PUBLISHABLE_KEY_PROD`.
-
-## Packaging for Even Hub
-
-`app.json` declares the network whitelist (`g2.okou.ai` and `clerk.okou.ai`) for
-a future `.ehpk` submission:
-
-```bash
-npm run build
-npx @evenrealities/evenhub-cli pack app.json dist -o okou-g2.ehpk
-```
-
-Note that a packaged build runs from a WebView origin Even Realities does not
-publish, which Clerk has not been verified to accept. Loading `https://g2.okou.ai`
-by URL keeps the origin stable and is the supported path until that is tested.
-
-## Tests
-
-```bash
-npm test
-```
-
-Covers the storage layer's chunking, tombstone and torn-write behaviour, the
-thread sync state machine including cursor expiry and pagination, the Markdown
-stripper, the message projection and thinking indicator, and the optimistic
-send's id contract.
-
-## Acceptance checklist
-
-- [ ] Email code arrives and verifies on iOS
-- [ ] Email code arrives and verifies on Android
-- [ ] `/api/auth/me` returns the expected Clerk user ID
-- [ ] Session survives force-quitting and reopening the Even App
-- [ ] Token still refreshes after 5 minutes backgrounded or screen-locked
-- [ ] Session still restores after 24 hours
-- [ ] Signing out invalidates the old token
-- [ ] Chat list appears on the lens after sign-in
-- [ ] A new message in app.okou.ai reaches the glasses without a manual sync
-- [ ] The list survives force-quitting and reopening the Even App
-- [ ] The list survives an Android background suspend, and the Ably connection
-      recovers on resume
-- [ ] Thread list scrolls and selects on the glasses
-- [ ] Messages screen updates while a run is working, and the thinking
-      indicator clears when it finishes
-- [ ] Voice capture transcribes and sends; the message appears before the
-      server confirms
-- [ ] A failed send rolls the optimistic message back instead of leaving it
+Scan the URL QR from the Even App. This hosted flow keeps OAuth cookies and microphone uploads on the G2 origin.

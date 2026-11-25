@@ -1,89 +1,42 @@
-/**
- * Okou API client for the glasses app.
- *
- * Deliberately omits `X-Client-Type: App`. That header opts a request into the
- * web bundle's minimum-version gate, which would start returning 426 to this
- * app whenever the platform raises its floor.
- */
-import {
-  API_BASE_URL,
-  CHAT_EVENT_SCHEMA_VERSION,
-  CHAT_EVENT_SCHEMA_VERSION_HEADER,
-} from '../config'
+import { API_BASE_URL } from '../config'
+import { isUuid } from '../types'
 
-/** A non-2xx response the caller is expected to branch on (404, 409, 410, 426…). */
 export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code?: string,
-    readonly detail?: string,
-  ) {
-    super(detail ?? `Okou API responded ${status}${code ? ` (${code})` : ''}`)
-    this.name = 'ApiError'
+  constructor(readonly status: number, readonly code?: string) {
+    super('Okou API returned ' + status + (code ? ' (' + code + ')' : ''))
   }
 }
 
-export type TokenProvider = () => Promise<string | null>
-
-export interface ApiRequest {
-  readonly path: string
-  readonly method?: 'GET' | 'POST'
-  readonly body?: unknown
-  /** Send the chat-event schema version. Required by the chat event routes. */
-  readonly chatEventSchema?: boolean
-  readonly signal?: AbortSignal
-  /** Statuses to return rather than throw, so callers can branch on them. */
-  readonly expect?: readonly number[]
-}
-
-export interface ApiResponse<T> {
-  readonly status: number
-  readonly body: T
-}
-
-function errorDetails(body: unknown): { code?: string; message?: string } {
-  const error = (body as { error?: unknown } | null)?.error
-  if (typeof error === 'string') return { message: error }
-  if (!error || typeof error !== 'object') return {}
-  const { code, message } = error as { code?: unknown; message?: unknown }
-  return {
-    ...(typeof code === 'string' ? { code } : {}),
-    ...(typeof message === 'string' ? { message } : {}),
-  }
-}
+export type TokenProvider = () => Promise<string>
 
 export class OkouApiClient {
-  constructor(private readonly getToken: TokenProvider) {}
+  constructor(readonly getToken: TokenProvider, readonly signal: AbortSignal) {}
 
-  async request<T>(request: ApiRequest): Promise<ApiResponse<T>> {
-    const token = await this.getToken()
-    if (!token) throw new ApiError(401)
-
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${token}`,
-    }
-    if (request.chatEventSchema) {
-      headers[CHAT_EVENT_SCHEMA_VERSION_HEADER] = String(CHAT_EVENT_SCHEMA_VERSION)
-    }
-    if (request.body !== undefined) {
-      headers['Content-Type'] = 'application/json'
-    }
-
-    const response = await fetch(`${API_BASE_URL}${request.path}`, {
-      method: request.method ?? 'GET',
-      headers,
-      ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
-      ...(request.signal ? { signal: request.signal } : {}),
+  async request<T>(path: string, body?: object, accessToken?: string): Promise<T> {
+    const token = accessToken ?? await this.getToken()
+    this.signal.throwIfAborted()
+    const headers = new Headers({ authorization: 'Bearer ' + token })
+    if (body) headers.set('content-type', 'application/json')
+    const response = await fetch(API_BASE_URL + path, {
+      method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined,
+      credentials: 'omit', redirect: 'error', cache: 'no-store', signal: this.signal,
     })
-
-    // 204 and other empty bodies must not go through json().
-    const text = await response.text()
-    const body = (text.length === 0 ? null : JSON.parse(text)) as T
-
-    if (response.ok || request.expect?.includes(response.status)) {
-      return { status: response.status, body }
+    if (!response.ok) {
+      const detail = await response.json().catch(() => null) as { error?: { code?: string } } | null
+      throw new ApiError(response.status, detail?.error?.code)
     }
-    const error = errorDetails(body)
-    throw new ApiError(response.status, error.code, error.message)
+    return response.json() as Promise<T>
+  }
+
+  async upload(audio: Blob): Promise<string> {
+    const token = await this.getToken()
+    const response = await fetch('/api/voice', {
+      method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'audio/wav' },
+      body: audio, credentials: 'omit', redirect: 'error', signal: this.signal,
+    })
+    if (!response.ok) throw new Error('Voice upload failed (' + response.status + ')')
+    const result = await response.json() as { id?: unknown }
+    if (!isUuid(result.id)) throw new Error('Invalid voice upload receipt')
+    return result.id
   }
 }

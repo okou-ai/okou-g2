@@ -1,352 +1,218 @@
-/**
- * Glasses screen state machine.
- *
- * Three screens, driven entirely from the temple or ring touchpad:
- *
- *   threads ──click item──▶ messages ──click──▶ compose ──send──▶ messages
- *      ▲                        │                   │
- *      └──── 2x-tap ────────────┴─── 2x-tap ────────┘
- *
- * `threads` is the root page, so a double tap there exits through the system
- * confirmation dialog, which Even requires of a root page.
- *
- * The controller owns the lens only. It reads chat state through the callbacks
- * it is given, so the same sync engine drives the phone UI and the glasses
- * without either one knowing about the other.
- */
-import { OsEventTypeList, type EvenAppBridge, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
-
+import { OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
+import { MAX_RECORDING_SECONDS } from '../config'
 import { startRecording, type Recorder } from './audio'
-import { toLensMessages, isRunInProgress, type LensMessage } from './messages'
-import {
-  composePage,
-  messagesPage,
-  startupPage,
-  threadListPage,
-  THREADS_CONTAINER_ID,
-} from './screens'
-import type { ChatEventRow, ChatThread } from '../types'
+import type { LensMessage } from './messages'
+import { startupPage, lensPage, paginate, type LensPage } from './screens'
 
-export type LensScreen = 'threads' | 'messages' | 'compose'
-
-export interface ControllerHooks {
-  /** Threads to list, newest first. */
-  listThreads(): readonly ChatThread[]
-  listStatus?(): string | null
-  /** Persisted rows for one thread. */
-  readMessages(threadId: string): Promise<readonly ChatEventRow[]>
-  /** Fetch history when a thread is opened, including an uncached thread. */
-  syncMessages(threadId: string): Promise<void>
-  /** Transcribe captured audio. Returns null when nothing was recognised. */
-  transcribe(audio: Blob): Promise<string | null>
-  /** Send a prompt; resolves with the thread it landed in. */
-  send(prompt: string, threadId?: string, onOptimistic?: (threadId: string) => void): Promise<string>
-  /** Surface the current screen to the phone UI. */
-  onScreen?(screen: LensScreen, threadId: string | null): void
-  onError?(message: string | null): void
+export interface LensView {
+  thread: string | null
+  messages: readonly LensMessage[]
+  status: string
+  canRecord: boolean
+  pending: boolean
 }
 
-type ComposeStage = 'idle' | 'recording' | 'transcribing' | 'sending' | 'failed'
+type Stage = 'read' | 'starting' | 'recording' | 'stopping' | 'review' | 'sending'
+type Voice = (target: string, audio: Blob) => Promise<'sent' | 'pending'>
 
 export class LensController {
-  private screen: LensScreen = 'threads'
-  private threadId: string | null = null
-  private compose: ComposeStage = 'idle'
-  private composeNote = ''
-  private transcript = ''
-  private messageLoading = false
-  private messageError: string | null = null
-  private sending = false
-  private operationVersion = 0
-  private historyVersion = 0
+  private view: LensView = { thread: null, messages: [], status: 'Open Okou on your phone', canRecord: false, pending: false }
+  private stage: Stage = 'read'
+  private note = ''
   private recorder: Recorder | null = null
-  private unsubscribe: (() => void) | null = null
+  private clip: Blob | null = null
+  private revision = 0
+  private timer?: ReturnType<typeof setTimeout>
+  private unsubscribe?: () => void
+  private selection: { id: string; page: number } | null = null
+  private renderQueue = Promise.resolve()
+  private lastPage = ''
   private closed = false
-  /** Guards against two renders racing a `rebuildPageContainer`. */
-  private rendering: Promise<void> = Promise.resolve()
+  private micCleanup: Promise<void> = Promise.resolve()
 
-  constructor(
-    private readonly bridge: EvenAppBridge,
-    private readonly hooks: ControllerHooks,
-  ) {}
+  constructor(private readonly bridge: EvenAppBridge, private readonly send: Voice,
+    private readonly refresh: () => void, private readonly onError: (message: string) => void) {}
 
-  async start(): Promise<boolean> {
-    // The startup page must exist before any rebuild, and the glasses
-    // microphone refuses to start without it.
-    const created = await this.bridge.createStartUpPageContainer(startupPage('Okou\nLoading...'))
-    if (created !== 0) return false
-    this.unsubscribe = this.bridge.onEvenHubEvent((event) => this.handle(event))
-    await this.render()
-    return true
-  }
-
-  close(): void {
-    this.closed = true
-    this.operationVersion += 1
-    this.unsubscribe?.()
-    this.unsubscribe = null
-    void this.recorder?.cancel()
-    this.recorder = null
-  }
-
-  /** Re-render after chat state changed elsewhere. */
-  refresh(): void {
-    if (this.screen === 'compose') return
-    void this.render()
-  }
-
-  private setScreen(screen: LensScreen, threadId: string | null): void {
-    this.screen = screen
-    this.threadId = threadId
-    this.hooks.onScreen?.(screen, threadId)
-  }
-
-  private handle(event: EvenHubEvent): void {
+  async start() {
+    if (await this.bridge.createStartUpPageContainer(startupPage()) !== 0) throw new Error('Could not open the G2 display')
     if (this.closed) return
-    const list = event.listEvent
-    const text = event.textEvent
-    const sys = event.sysEvent
-    // Audio frames share this callback but have no gesture payload. Only a
-    // gesture payload may use the missing-eventType fallback for a tap.
-    if (!list && !text && !sys) return
-    const type = list?.eventType ?? text?.eventType ?? sys?.eventType
-
-    // The SDK normalizes a zero event type to undefined on some hosts, and
-    // zero is CLICK_EVENT.
-    const isClick = type === OsEventTypeList.CLICK_EVENT || type === undefined
-    const isDoubleClick = type === OsEventTypeList.DOUBLE_CLICK_EVENT
-
-    if (isDoubleClick) {
-      void this.onDoubleClick()
-      return
-    }
-    if (!isClick) return
-
-    if (this.screen === 'threads' && list?.containerID === THREADS_CONTAINER_ID) {
-      void this.onThreadSelected(list.currentSelectItemIndex ?? 0)
-      return
-    }
-    void this.onClick()
+    this.unsubscribe = this.bridge.onEvenHubEvent((event) => this.handle(event))
+    this.draw()
   }
 
-  private async onDoubleClick(): Promise<void> {
-    this.operationVersion += 1
-    switch (this.screen) {
-      case 'threads':
-        // Root page: mode 1 raises the system exit confirmation.
-        await this.bridge.shutDownPageContainer(1)
-        return
-      case 'messages':
-        this.setScreen('threads', null)
-        await this.render()
-        return
-      case 'compose':
-        await this.recorder?.cancel()
-        this.recorder = null
-        this.compose = 'idle'
-        this.composeNote = ''
-        this.transcript = ''
-        // Back to the thread it was started from, or the list for a new chat.
-        this.setScreen(this.threadId ? 'messages' : 'threads', this.threadId)
-        await this.render()
-    }
+  update(view: LensView) {
+    const changed = view.thread !== this.view.thread
+    if (view.messages.at(-1)?.id !== this.view.messages.at(-1)?.id && this.stage === 'read') this.note = ''
+    this.view = view
+    if (changed) {
+      this.selection = null
+      this.cancel()
+    } else this.draw()
   }
 
-  private async onClick(): Promise<void> {
-    if (this.screen === 'messages') {
-      if (this.sending) return
-      if (this.messageError && this.threadId) {
-        await this.openThread(this.threadId)
-        return
-      }
-      // A tap in a thread starts a new message in that same thread.
-      this.setScreen('compose', this.threadId)
-      this.compose = 'idle'
-      this.composeNote = ''
-      this.transcript = ''
-      await this.render()
-      return
-    }
-    if (this.screen === 'compose') {
-      await this.toggleRecording()
-    }
+  suspend() {
+    if (this.stage !== 'sending') this.cancel()
   }
 
-  private async onThreadSelected(index: number): Promise<void> {
-    if (index === 0) {
-      // Item 0 is "+ New chat", so a new thread has no id yet.
-      this.setScreen('compose', null)
-      this.compose = 'idle'
-      this.composeNote = ''
-      this.transcript = ''
-      await this.render()
-      return
-    }
-    const thread = this.hooks.listThreads()[index - 1]
-    if (!thread) return
-    await this.openThread(thread.id)
+  close() {
+    this.closed = true
+    this.unsubscribe?.()
+    this.cancel()
   }
 
-  private async openThread(threadId: string): Promise<void> {
-    const version = ++this.historyVersion
-    this.messageLoading = true
-    this.messageError = null
-    this.hooks.onError?.(null)
-    this.setScreen('messages', threadId)
-    await this.render()
-    try {
-      await this.hooks.syncMessages(threadId)
-    } catch (error) {
-      if (this.closed || version !== this.historyVersion || this.threadId !== threadId) return
-      this.messageError = error instanceof Error ? error.message : 'Could not load messages'
-      this.hooks.onError?.(this.messageError)
+  private cancel() {
+    this.revision++
+    clearTimeout(this.timer)
+    if (this.recorder) {
+      this.micCleanup = this.recorder.cancel().catch(() => this.onError('Could not close the microphone'))
     }
-    if (this.closed || version !== this.historyVersion || this.threadId !== threadId) return
-    this.messageLoading = false
-    await this.render()
-  }
-
-  private async toggleRecording(): Promise<void> {
-    if (this.compose === 'transcribing' || this.compose === 'sending') return
-    if (this.compose === 'failed' && this.transcript) {
-      await this.sendTranscript(this.transcript)
-      return
-    }
-
-    if (this.compose !== 'recording') {
-      try {
-        this.recorder = await startRecording(this.bridge)
-        this.compose = 'recording'
-        this.composeNote = ''
-      } catch (error) {
-        this.compose = 'failed'
-        this.composeNote = error instanceof Error ? error.message : 'Microphone failed'
-      }
-      await this.render()
-      return
-    }
-
-    const recorder = this.recorder
-    const version = this.operationVersion
     this.recorder = null
-    this.compose = 'transcribing'
-    await this.render()
+    this.clip = null
+    this.stage = 'read'
+    this.note = ''
+    this.draw()
+  }
 
+  private handle(event: EvenHubEvent) {
+    const gesture = event.textEvent ?? event.sysEvent ?? event.listEvent
+    if (this.closed || !gesture) return // PCM frames are not taps.
+    const type = gesture.eventType ?? Gesture.CLICK_EVENT
+    if (type === Gesture.FOREGROUND_ENTER_EVENT) { this.lastPage = ''; this.refresh(); this.draw(); return }
+    if ([Gesture.FOREGROUND_EXIT_EVENT, Gesture.SYSTEM_EXIT_EVENT, Gesture.ABNORMAL_EXIT_EVENT].includes(type)) {
+      this.suspend()
+      return
+    }
+    if (type === Gesture.DOUBLE_CLICK_EVENT) {
+      if (this.stage === 'read') void this.bridge.shutDownPageContainer(1).catch(() => this.onError('Could not close the G2 page'))
+      else if (this.stage !== 'sending') this.cancel()
+      return
+    }
+    if (this.stage === 'read' && (type === Gesture.SCROLL_TOP_EVENT || type === Gesture.SCROLL_BOTTOM_EVENT)) {
+      this.scroll(type === Gesture.SCROLL_TOP_EVENT ? -1 : 1)
+    } else if (type === Gesture.CLICK_EVENT) void this.tap()
+  }
+
+  private activeMessage() {
+    const list = this.view.messages
+    const chosen = this.selection && list.findIndex((m) => m.id === this.selection!.id)
+    const index = chosen !== null && chosen >= 0 ? chosen : list.length - 1
+    const message = list[index]
+    if (!message) return null
+    const pages = paginate(message.text)
+    const page = Math.min(this.selection?.id === message.id ? this.selection.page : 0, pages.length - 1)
+    return { message, index, pages, page }
+  }
+
+  private scroll(direction: number) {
+    const at = this.activeMessage()
+    if (!at) return
+    let id = at.message.id, page = at.page + direction
+    if (page < 0 || page >= at.pages.length) {
+      const adjacent = this.view.messages[at.index + direction]
+      if (!adjacent) return
+      id = adjacent.id
+      page = direction > 0 ? 0 : paginate(adjacent.text).length - 1
+    }
+    this.selection = id === this.view.messages.at(-1)?.id && page === 0 ? null : { id, page }
+    this.note = ''
+    this.draw()
+  }
+
+  private async tap() {
+    if (this.stage === 'recording') return this.finishRecording(true)
+    if (this.stage === 'review') return this.sendClip()
+    if (this.stage !== 'read') return
+    if (!this.view.canRecord || !this.view.thread || this.view.pending) { this.refresh(); return }
+    this.stage = 'starting'
+    this.note = ''
+    this.draw()
+    const version = ++this.revision
+    // If the account changes while audioControl(true) is in flight, turn off
+    // that microphone before a new capture is allowed to open it again.
+    this.micCleanup = this.micCleanup.then(async () => {
+      if (version !== this.revision) return
+      const recorder = await startRecording(this.bridge)
+      if (version !== this.revision) { await recorder.cancel(); return }
+      this.recorder = recorder
+      this.stage = 'recording'
+      this.timer = setTimeout(() => void this.finishRecording(false), MAX_RECORDING_SECONDS * 1000)
+    }).catch(() => {
+      if (version === this.revision) { this.stage = 'read'; this.note = 'Microphone unavailable · tap to retry' }
+    })
+    await this.micCleanup
+    this.draw()
+  }
+
+  private async finishRecording(send: boolean) {
+    const recorder = this.recorder
+    if (!recorder || this.stage !== 'recording') return
+    const version = this.revision
+    this.recorder = null
+    clearTimeout(this.timer)
+    this.stage = 'stopping'
+    this.draw()
     try {
-      const audio = await recorder?.stop()
-      if (!audio) {
-        this.compose = 'failed'
-        this.composeNote = 'Nothing recorded'
-        await this.render()
-        return
+      const stopped = recorder.stop()
+      this.micCleanup = stopped.then(() => undefined, () => undefined)
+      const audio = await stopped
+      if (version !== this.revision) return
+      if (!audio) { this.note = 'No audio captured · tap to retry'; this.stage = 'read' }
+      else {
+        this.clip = audio
+        this.stage = 'review'
+        if (send) return this.sendClip()
       }
-      const transcript = await this.hooks.transcribe(audio)
-      if (this.closed || version !== this.operationVersion) return
-      if (!transcript) {
-        this.compose = 'failed'
-        this.composeNote = 'Could not hear that'
-        await this.render()
-        return
-      }
-
-      await this.sendTranscript(transcript)
-    } catch (error) {
-      if (this.closed || version !== this.operationVersion) return
-      this.compose = 'failed'
-      this.composeNote = error instanceof Error ? error.message : 'Send failed'
-      this.hooks.onError?.(this.composeNote)
+    } catch {
+      if (version === this.revision) { this.note = 'Recording failed · tap to retry'; this.stage = 'read' }
     }
-    await this.render()
+    this.draw()
   }
 
-  private async sendTranscript(transcript: string): Promise<void> {
-    const version = this.operationVersion
-    const target = this.threadId
-    this.transcript = transcript
-    this.compose = 'sending'
-    this.composeNote = transcript
-    this.sending = true
-    this.hooks.onError?.(null)
-    await this.render()
+  private async sendClip() {
+    if (!this.clip || !this.view.thread || this.stage !== 'review') return
+    const version = this.revision
+    this.stage = 'sending'
+    this.draw()
     try {
-      const threadId = await this.hooks.send(transcript, target ?? undefined, (id) => {
-        if (this.closed || version !== this.operationVersion) return
-        this.messageLoading = false
-        this.messageError = null
-        this.setScreen('messages', id)
-        void this.render()
-      })
-      if (this.closed || version !== this.operationVersion) return
-      this.compose = 'idle'
-      this.composeNote = ''
-      this.transcript = ''
-      this.setScreen('messages', threadId)
+      const result = await this.send(this.view.thread, this.clip)
+      if (version !== this.revision) return
+      this.clip = null
+      this.stage = 'read'
+      this.selection = null
+      this.note = result === 'sent' ? 'Voice message sent' : ''
     } catch (error) {
-      if (this.closed || version !== this.operationVersion) return
-      this.compose = 'failed'
-      this.composeNote = error instanceof Error ? error.message : 'Send failed'
-      this.setScreen('compose', target)
-      this.hooks.onError?.(this.composeNote)
-    } finally {
-      this.sending = false
+      if (version !== this.revision) return
+      this.onError(error instanceof Error ? error.message : 'Send failed')
+      this.note = 'Send failed'
+      this.stage = 'review'
     }
-    if (!this.closed && version === this.operationVersion) await this.render()
+    this.draw()
   }
 
-  private composeLines(): readonly string[] {
-    switch (this.compose) {
-      case 'recording':
-        return ['Listening...', 'Tap to send']
-      case 'transcribing':
-        return ['Transcribing...']
-      case 'sending':
-        return ['Sending...', this.composeNote]
-      case 'failed':
-        return [this.composeNote, this.transcript ? 'Tap to retry sending' : 'Tap to try again']
-      default:
-        return [this.threadId ? 'Reply by voice' : 'New chat', 'Tap to speak']
+  private page(): LensPage {
+    if (this.stage !== 'read') {
+      const body = { starting: 'Opening microphone…', recording: 'Listening…', stopping: 'Finishing recording…',
+        review: this.note || 'Recording ready', sending: 'Sending voice message…' }[this.stage]
+      return { heading: 'Voice message', body, footer: this.stage === 'recording' || this.stage === 'review'
+        ? 'Tap to send · double-tap to discard' : '' }
+    }
+    const at = this.activeMessage()
+    const status = this.view.pending ? 'Checking delivery · tap to refresh' : this.view.status
+    return {
+      heading: at ? (at.message.role === 'assistant' ? 'Okou' : 'You') + '   ' + (at.page + 1) + '/' + at.pages.length : 'Okou',
+      body: at?.pages[at.page] ?? (this.view.thread && !status ? 'No messages yet' : status),
+      footer: !at && status ? '' : status || this.note || 'Swipe to read · tap to speak',
     }
   }
 
-  private async messageState(): Promise<{
-    messages: readonly LensMessage[]
-    status: string
-  }> {
-    if (!this.threadId) return { messages: [], status: '' }
-    const rows = await this.hooks.readMessages(this.threadId)
-    const messages = toLensMessages(rows)
-    let status = messages.length === 0 ? 'No messages yet · tap to speak' : 'Tap to reply · 2x-tap back'
-    if (isRunInProgress(rows)) status = 'Thinking...'
-    if (this.sending) status = 'Sending...'
-    if (this.messageLoading) status = 'Loading messages...'
-    if (this.messageError) status = 'Could not load messages · tap to retry'
-    return { messages, status }
-  }
-
-  /** Serialized so two triggers cannot rebuild the page concurrently. */
-  private render(): Promise<void> {
-    const operation = this.rendering.then(async () => {
+  private draw() {
+    if (this.closed || !this.unsubscribe) return
+    this.renderQueue = this.renderQueue.then(async () => {
       if (this.closed) return
-      let page
-      if (this.screen === 'threads') {
-        const titles = this.hooks.listThreads().map((thread) => thread.title ?? 'Untitled')
-        page = threadListPage(titles, this.hooks.listStatus?.())
-      } else if (this.screen === 'compose') {
-        page = composePage(this.composeLines())
-      } else {
-        const threadId = this.threadId
-        const { messages, status } = await this.messageState()
-        if (this.closed || this.screen !== 'messages' || this.threadId !== threadId) return
-        page = messagesPage(messages, status)
-      }
-      const ok = await this.bridge.rebuildPageContainer(page)
-      if (!ok) throw new Error('The glasses could not display this page')
-    })
-    // One failed storage read or native rebuild must not poison every future
-    // render, including returning to the list or retrying a send.
-    this.rendering = operation.catch((error: unknown) => {
-      this.hooks.onError?.(error instanceof Error ? error.message : 'Display failed')
-    })
-    return this.rendering
+      const page = this.page(), key = JSON.stringify(page)
+      if (this.lastPage === key) return
+      if (!await this.bridge.rebuildPageContainer(lensPage(page))) throw new Error('Could not update the G2 display')
+      this.lastPage = key
+    }).catch((e: Error) => this.onError(e.message))
   }
 }
