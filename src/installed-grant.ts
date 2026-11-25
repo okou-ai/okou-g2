@@ -21,7 +21,9 @@ const credentials = createStore('okou-g2-auth', 'grants')
 async function clerk(path: string, params: Record<string, string>) {
   const response = await fetch(OAUTH_ISSUER + path, {
     method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store', referrerPolicy: 'no-referrer',
-    body: new URLSearchParams({ client_id: DEVICE_CLIENT_ID, ...params }),
+    // The iOS WebView bridge can turn URLSearchParams into a string before fetch sets its media type.
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: DEVICE_CLIENT_ID, ...params }).toString(),
   })
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null
@@ -35,7 +37,11 @@ export class InstalledGrant {
 
   async device() {
     const response = await clerk('/oauth/device_authorization', { scope: DEVICE_SCOPE })
-    return parseDeviceCode(await response.json() as DeviceCode)
+    try {
+      return parseDeviceCode(await response.json() as DeviceCode)
+    } catch {
+      throw new AuthError('invalid_device_response', response.status)
+    }
   }
 
   private async read(): Promise<Grant | undefined> {

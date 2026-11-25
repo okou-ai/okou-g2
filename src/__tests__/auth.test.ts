@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DeviceAuth } from '../auth'
 import { AuthError, InstalledGrant } from '../installed-grant'
+import { version } from '../../app.json'
 const memory = () => {
   const map = new Map<string, string>()
   return { setItem: (key: string, value: string) => map.set(key, value),
@@ -15,6 +16,18 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', memory()); vi.stubGlobal('sessionStorage', memory())
 })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
+
+it('reports the installed build, origin and a safe OAuth failure without exposing provider text', async () => {
+  vi.stubGlobal('location', new URL('http://127.0.0.1:50496/private?q=fixture'))
+  const grants = new InstalledGrant()
+  vi.spyOn(grants, 'device').mockRejectedValueOnce(new AuthError('invalid_request', 400))
+    .mockRejectedValueOnce(new AuthError('untrusted response details', 403))
+  const auth = new DeviceAuth(grants)
+  await auth.begin()
+  expect(auth.snapshot()).toMatchObject({ error: 'Device sign-in failed (HTTP 400, invalid_request). G2 ' + version + ' · http://127.0.0.1:50496' })
+  await auth.begin()
+  expect(auth.snapshot()).toMatchObject({ error: 'Device sign-in failed (HTTP 403). G2 ' + version + ' · http://127.0.0.1:50496' })
+})
 
 it('honours the device interval, slow_down and a workspace grant', async () => {
   const grants = new InstalledGrant()

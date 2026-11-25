@@ -6,7 +6,7 @@ Speak to a dedicated Okou conversation from Even G2 glasses and read replies on 
 
 Use the Even Hub Beta package for all product validation on the glasses. Accept the tester invitation, then open **Me → Beta tester → Okou → Install** in the Even Realities app using the invited account. Open Okou from the glasses launcher. [Even Hub Beta testing](https://hub.evenrealities.com/docs/test/beta-testing)
 
-Version 0.4.2 starts device sign-in directly at Clerk. After approval, the phone opens the conversation through the production Okou API. If the WebView cannot reach this API, the phone displays its origin for diagnosing CORS. Product acceptance covers the installed Beta on a paired phone and glasses.
+The installed Beta requests a device code directly from Clerk. If this step fails, version 0.4.3 and later show the build, WebView origin and any available HTTP status on the phone. After approval, the phone opens the conversation through the production Okou API. If the WebView cannot reach this API, the phone displays its origin for diagnosing CORS. Product acceptance covers the installed Beta on a paired phone and glasses.
 
 ## Sign in and use the glasses
 
