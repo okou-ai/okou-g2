@@ -1,4 +1,5 @@
-import { decodeJwt } from 'jose'
+import { decodeJwt, type JWTPayload } from 'jose'
+import { CANCEL_SCOPE, CHAT_SCOPES, MCP_URL } from './config'
 import type { DeviceCode, DeviceSession } from './types'
 
 export const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
@@ -14,16 +15,36 @@ export function parseDeviceCode(data: DeviceCode): DeviceCode {
     expires_in: data.expires_in, interval }
 }
 
+export const MCP_GRANT_PROMPT = 'Sign in again to authorize this device for Okou chat.'
+export class McpConsentRequired extends Error {}
+
+function tokenScopes({ scope, scp }: JWTPayload): readonly unknown[] {
+  if (Array.isArray(scp)) return scp
+  return typeof scope === 'string' ? scope.split(' ') : []
+}
+
+export function requireCancellationGrant(token: string) {
+  if (!tokenScopes(decodeJwt(token)).includes(CANCEL_SCOPE)) {
+    throw new Error('To cancel tasks, sign out on your phone and sign in again to grant permission.')
+  }
+}
+
 export function parseSession(body: Record<string, unknown>, clientId: string): DeviceSession {
   if (typeof body.access_token !== 'string' || String(body.token_type).toLowerCase() !== 'bearer') {
     throw new Error('Invalid access token')
   }
   // The issuer supplied this token over HTTPS. The API verifies it independently.
-  const { sub, org_id, exp, client_id } = decodeJwt(body.access_token)
+  const claims = decodeJwt(body.access_token)
+  const { sub, org_id, exp, client_id, aud } = claims
   if (client_id !== clientId || !sub?.startsWith('user_') ||
       typeof org_id !== 'string' || !org_id.startsWith('org_') ||
       typeof exp !== 'number' || exp * 1000 <= Date.now()) {
     throw new Error('Authorize again and select a workspace')
+  }
+  const audiences = typeof aud === 'string' ? [aud] : aud
+  const scopes = tokenScopes(claims)
+  if (!audiences?.includes(MCP_URL) || !CHAT_SCOPES.every(permission => scopes.includes(permission))) {
+    throw new McpConsentRequired(MCP_GRANT_PROMPT)
   }
   return { accessToken: body.access_token, userId: sub, orgId: org_id, expiresAt: exp * 1000 }
 }

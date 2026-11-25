@@ -1,6 +1,6 @@
 import { createStore, del, get, set } from 'idb-keyval'
-import { DEVICE_CLIENT_ID, DEVICE_SCOPE, OAUTH_ISSUER } from './config'
-import { DEVICE_GRANT, deviceCodeHash, parseDeviceCode, parseSession } from './device-protocol'
+import { DEVICE_CLIENT_ID, DEVICE_SCOPE, MCP_URL, OAUTH_ISSUER } from './config'
+import { DEVICE_GRANT, McpConsentRequired, deviceCodeHash, parseDeviceCode, parseSession } from './device-protocol'
 import type { DeviceCode, DeviceSession } from './types'
 import { connectBridge } from './glasses'
 import { clearGrant, installation, readGrant, sessionHandle, writeGrant, type Grant, type InstallStorage } from './install-storage'
@@ -41,7 +41,7 @@ export class InstalledGrant {
   }
 
   async device() {
-    const response = await clerk('/oauth/device_authorization', { scope: DEVICE_SCOPE })
+    const response = await clerk('/oauth/device_authorization', { scope: DEVICE_SCOPE, resource: MCP_URL })
     try {
       return parseDeviceCode(await response.json() as DeviceCode)
     } catch {
@@ -124,8 +124,11 @@ export class InstalledGrant {
     if (previous?.handle && previous.handle !== expectedHandle) throw new AuthError('signed_out', 401)
     let response: Response
     try {
-      response = await clerk('/oauth/token', params)
+      response = await clerk('/oauth/token', { ...params, resource: MCP_URL })
     } catch (error) {
+      if (previous && error instanceof AuthError && ['invalid_target', 'invalid_scope'].includes(error.code)) {
+        throw new AuthError('mcp_grant_required', 401)
+      }
       if (previous && error instanceof AuthError && ['invalid_grant', 'access_denied', 'expired_token'].includes(error.code)) {
         // An older WebView may lose a rotation race. Never erase a newer grant on a stale rejection.
         const latest = await this.read()
@@ -138,7 +141,7 @@ export class InstalledGrant {
     const body = await response.json() as Record<string, unknown>
     let session: DeviceSession
     try { session = parseSession(body, DEVICE_CLIENT_ID) }
-    catch { throw new AuthError('workspace_grant_required', 401) }
+    catch (error) { throw new AuthError(error instanceof McpConsentRequired ? 'mcp_grant_required' : 'workspace_grant_required', 401) }
     const token = body.refresh_token ?? previous?.refreshToken
     if (typeof token !== 'string' || !token) throw new AuthError('offline_grant_required', 401)
     const persisted = await this.save({ refreshToken: token, deviceHash: hash }, storage, expectedHandle, previous)

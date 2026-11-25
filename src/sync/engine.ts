@@ -1,5 +1,6 @@
 import { ApiError, OkouApiClient, type TokenProvider } from '../api/client'
-import { DeviceStore, metadata, type Pending } from '../store'
+import { requireCancellationGrant } from '../device-protocol'
+import { DeviceStore, type Pending } from '../store'
 import type { ChatEventRow, Identity } from '../types'
 import { currentTask, type TaskTarget } from '../lens/messages'
 import { readHistory, type History } from './messages'
@@ -48,8 +49,8 @@ export class DeviceChat {
     return this.refresh()
   }
 
-  private async bind() {
-    const id = await this.store.fixedThread(this.api)
+  private async bind(missingThread?: string) {
+    const id = await this.store.fixedThread(this.api, missingThread)
     this.abort.signal.throwIfAborted()
     if (id === this.state.thread) return
     this.unwatch?.()
@@ -78,6 +79,7 @@ export class DeviceChat {
 
   private async drain() {
     this.publish({ syncing: true })
+    let replacedMissingThread = false
     try {
       while (this.dirty && !this.abort.signal.aborted) {
         this.dirty = false
@@ -88,10 +90,11 @@ export class DeviceChat {
         try {
           history = await readHistory(this.api, id, this.history, pending?.clientEventId)
         } catch (error) {
-          // History errors (including missing archives) never create a thread.
-          // Re-check authoritative metadata if the thread itself may be gone.
-          if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
-            await this.bind()
+          // get_chat_messages checks thread ownership before returning history. A missing
+          // transport endpoint or expired cursor must never allocate another conversation.
+          if (!replacedMissingThread && error instanceof ApiError && error.missingThread) {
+            replacedMissingThread = true
+            await this.bind(id)
             if (this.state.thread !== id) { this.dirty = true; continue }
           }
           throw error
@@ -112,18 +115,16 @@ export class DeviceChat {
   }
 
   private async submit(thread: string, pending: Pending, token: string, firstAttempt: boolean): Promise<'sent' | 'pending'> {
-    const { fileId, clientEventId, chatThreadSortEventId, computerUseHostId, cloudBrowserEnabled } = pending
+    const { fileId, clientEventId } = pending
     this.publish({ pending: true })
     try {
-      const reply = await this.api.request<{ threadId: string }>('/api/chat/events', {
-        threadId: thread, clientEventId, chatThreadSortEventId, computerUseHostId, cloudBrowserEnabled,
-        prompt: '(see message parts)', hasTextContent: false,
+      const reply = await this.api.call<{ threadId: string; eventId: string }>('send_chat_message', {
+        threadId: thread, clientEventId,
         userMessage: { version: 1, parts: [{ type: 'voice', clips: [{ fileId }] }] },
       }, token)
-      if (reply.threadId !== thread) return 'pending'
+      if (reply.threadId !== thread || reply.eventId !== clientEventId) return 'pending'
     } catch (error) {
-      if (!(error instanceof ApiError && error.status >= 400 && error.status < 500 &&
-            error.status !== 408 && error.status !== 409)) return 'pending'
+      if (!(error instanceof ApiError && error.rejected)) return 'pending'
       if (firstAttempt) {
         await this.store.acknowledge(thread, clientEventId)
         this.publish({ pending: false })
@@ -140,9 +141,10 @@ export class DeviceChat {
     this.assertTarget(thread)
     const active = currentTask(this.state.rows)
     if (active?.id !== target.id || active.kind !== target.kind) return
-    const control = target.kind === 'run' ? { interruptsRunId: target.id } : { revokesEventId: target.id }
+    requireCancellationGrant(token)
     try {
-      await this.api.request('/api/chat/events', { threadId: thread, clientEventId: crypto.randomUUID(), ...control }, token)
+      if (target.kind === 'run') await this.api.call('cancel_run', { runId: target.id }, token)
+      else await this.api.call('revoke_queued_message', { threadId: thread, eventId: target.id }, token)
     } finally {
       void this.refresh()
     }
@@ -155,10 +157,9 @@ export class DeviceChat {
     try {
       if (await this.store.pending(thread)) return 'pending'
       const fileId = await this.api.upload(audio)
-      const target = await metadata(this.api, thread)
       const token = await this.api.getToken()
       this.assertTarget(thread)
-      const pending = await this.store.reserveSend(target, fileId)
+      const pending = await this.store.reserveSend(thread, fileId)
       try { this.assertTarget(thread) } catch (error) {
         await this.store.acknowledge(thread, pending.clientEventId)
         throw error

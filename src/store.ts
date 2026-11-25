@@ -3,32 +3,14 @@ import { connectBridge } from './glasses'
 import { exclusive, newThreadId, put, type InstallStorage } from './install-storage'
 import { API_BASE_URL } from './config'
 import { isUuid, type Identity } from './types'
-import { ApiError, type OkouApiClient } from './api/client'
-
-export interface ThreadMetadata {
-  id: string
-  computerUseHostId: string | null
-  cloudBrowserEnabled: boolean
-}
+import type { OkouApiClient } from './api/client'
 
 type Binding = { id: string; ready: boolean }
 export interface Pending {
   clientEventId: string
-  chatThreadSortEventId: string
   fileId: string
-  computerUseHostId: string | null
-  cloudBrowserEnabled: boolean
 }
 const database = createStore('okou-g2-device', 'chat')
-
-export async function metadata(client: OkouApiClient, id: string): Promise<ThreadMetadata> {
-  const data = await client.request<ThreadMetadata>('/api/chat-threads/' + id + '/metadata')
-  if (data.id !== id || typeof data.cloudBrowserEnabled !== 'boolean' ||
-      (data.computerUseHostId !== null && !isUuid(data.computerUseHostId))) {
-    throw new Error('Invalid thread metadata')
-  }
-  return data
-}
 
 export class DeviceStore {
   private readonly key: string
@@ -59,21 +41,12 @@ export class DeviceStore {
       ? { id: candidate, ready: false } : old)
   }
 
-  async fixedThread(client: OkouApiClient): Promise<string> {
+  async fixedThread(client: OkouApiClient, missingThread?: string): Promise<string> {
     const storage = await this.storage()
-    let binding = await this.reserve(storage)
-    if (binding.ready) {
-      try {
-        await metadata(client, binding.id)
-        return binding.id
-      } catch (error) {
-        if (!(error instanceof ApiError && (error.status === 404 || error.status === 410))) throw error
-      }
-      binding = await this.reserve(storage, binding.id)
-      if (binding.ready) return binding.id
-    }
-    const thread = await client.request<{ id: string }>('/api/chat-threads', { clientThreadId: binding.id, title: 'Even G2' })
-    if (thread.id !== binding.id) throw new Error('Thread creation returned a different ID')
+    const binding = await this.reserve(storage, missingThread)
+    if (binding.ready) return binding.id
+    const thread = await client.call<{ threadId: string }>('create_chat_thread', { clientThreadId: binding.id, title: 'Even G2' })
+    if (thread.threadId !== binding.id) throw new Error('Thread creation returned a different ID')
     await this.updateBinding(storage, (current) => {
       if (current?.id !== binding.id) throw new Error('The device conversation changed')
       return { ...current, ready: true }
@@ -85,12 +58,10 @@ export class DeviceStore {
 
   pending(id: string) { return get<Pending>(this.pendingKey(id), database) }
 
-  async reserveSend(target: ThreadMetadata, fileId: string): Promise<Pending> {
-    const pending = {
-      clientEventId: crypto.randomUUID(), chatThreadSortEventId: crypto.randomUUID(), fileId,
-      computerUseHostId: target.computerUseHostId, cloudBrowserEnabled: target.cloudBrowserEnabled,
-    }
-    await update<Pending>(this.pendingKey(target.id), (current) => {
+  async reserveSend(thread: string, fileId: string): Promise<Pending> {
+    // Older reservations also contain REST-only fields. The stable send and file IDs work on MCP.
+    const pending = { clientEventId: crypto.randomUUID(), fileId }
+    await update<Pending>(this.pendingKey(thread), (current) => {
       if (current) throw new Error('The previous send is awaiting confirmation')
       return pending
     }, database)

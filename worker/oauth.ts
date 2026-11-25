@@ -1,5 +1,5 @@
-import { DEVICE_SCOPE, OAUTH_ISSUER } from '../src/config'
-import { DEVICE_GRANT, deviceCodeHash, parseDeviceCode, parseSession } from '../src/device-protocol'
+import { DEVICE_SCOPE, MCP_URL, OAUTH_ISSUER } from '../src/config'
+import { DEVICE_GRANT, McpConsentRequired, deviceCodeHash, parseDeviceCode, parseSession } from '../src/device-protocol'
 import type { DeviceCode, DeviceSession } from '../src/types'
 
 export function json(data: unknown, status = 200, cookie?: string) {
@@ -37,7 +37,7 @@ export async function auth(request: Request, action: string, clientId: string): 
     return json({}, 200, cookie(''))
   }
   if (action === 'device') {
-    const response = await clerk('/oauth/device_authorization', { client_id: clientId, scope: DEVICE_SCOPE })
+    const response = await clerk('/oauth/device_authorization', { client_id: clientId, scope: DEVICE_SCOPE, resource: MCP_URL })
     if (!response.ok) return json({ error: 'device_authorization_failed' }, 502)
     try {
       return json(parseDeviceCode(await response.json() as DeviceCode))
@@ -62,10 +62,13 @@ export async function auth(request: Request, action: string, clientId: string): 
       : { grant_type: DEVICE_GRANT, device_code: input.device_code }
   } else return json({ error: 'not_found' }, 404)
 
-  const result = await clerk('/oauth/token', { ...params, client_id: clientId })
+  const result = await clerk('/oauth/token', { ...params, client_id: clientId, resource: MCP_URL })
   const body = await result.json() as Record<string, unknown>
   const refreshing = params.grant_type === 'refresh_token'
   if (!result.ok) {
+    if (refreshing && (body.error === 'invalid_target' || body.error === 'invalid_scope')) {
+      return json({ error: 'mcp_grant_required' }, 401)
+    }
     const known = ['authorization_pending', 'slow_down', 'access_denied', 'expired_token', 'invalid_grant']
     const code = typeof body.error === 'string' && known.includes(body.error) ? body.error : 'token_request_failed'
     if (refreshing && ['invalid_grant', 'access_denied', 'expired_token'].includes(code)) {
@@ -76,8 +79,8 @@ export async function auth(request: Request, action: string, clientId: string): 
   let session: DeviceSession
   try {
     session = parseSession(body, clientId)
-  } catch {
-    return json({ error: 'workspace_grant_required' }, 401, cookie(''))
+  } catch (error) {
+    return json({ error: error instanceof McpConsentRequired ? 'mcp_grant_required' : 'workspace_grant_required' }, 401, cookie(''))
   }
   const next = body.refresh_token ?? (refreshing ? refresh : null)
   if (typeof next !== 'string' || !next) return json({ error: 'offline_grant_required' }, 401, cookie(''))

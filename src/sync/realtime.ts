@@ -6,7 +6,7 @@ export function watchThread(client: OkouApiClient, identity: Identity, thread: s
   refresh: () => void, status: (connected: boolean) => void): () => void {
   const ably = new Ably.Realtime({
     authCallback: (_params, done) => {
-      void client.request<Ably.TokenRequest>('/api/realtime/token', {}).then(
+      void client.call<Ably.TokenRequest>('get_chat_realtime_token', {}).then(
         (request) => done(null, request), (error) => done(error, null))
     },
   })
