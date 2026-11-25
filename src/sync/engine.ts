@@ -1,6 +1,7 @@
 import { ApiError, OkouApiClient, type TokenProvider } from '../api/client'
 import { DeviceStore, metadata, type Pending } from '../store'
 import type { ChatEventRow, Identity } from '../types'
+import { currentTask, type TaskTarget } from '../lens/messages'
 import { readHistory, type History } from './messages'
 
 export interface ChatState {
@@ -132,6 +133,19 @@ export class DeviceChat {
     await this.store.acknowledge(thread, clientEventId)
     this.publish({ pending: false })
     return 'sent'
+  }
+
+  async cancelTask(thread: string, target: TaskTarget) {
+    const token = await this.api.getToken()
+    this.assertTarget(thread)
+    const active = currentTask(this.state.rows)
+    if (active?.id !== target.id || active.kind !== target.kind) return
+    const control = target.kind === 'run' ? { interruptsRunId: target.id } : { revokesEventId: target.id }
+    try {
+      await this.api.request('/api/chat/events', { threadId: thread, clientEventId: crypto.randomUUID(), ...control }, token)
+    } finally {
+      void this.refresh()
+    }
   }
 
   async sendVoice(thread: string, audio: Blob): Promise<'sent' | 'pending'> {

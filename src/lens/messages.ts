@@ -18,12 +18,12 @@ export interface LensMessage {
 }
 
 /** Event types that carry text a person actually wants to read. */
-const USER_TYPES = new Set(['input.prompt', 'input.rejected', 'input.automation', 'input.budget', 'input.goal'])
-const ASSISTANT_TYPES = new Set(['output.message', 'output.error', 'run.failed', 'run.cancelled'])
+const USER_TYPES = new Set(['input.prompt', 'input.automation', 'input.budget', 'input.goal'])
+const ASSISTANT_TYPES = new Set(['output.message', 'output.error', 'input.rejected', 'run.failed', 'run.cancelled', 'control.interrupt'])
 
 /** A run is working between these and its terminal event. */
-const RUN_STARTED = new Set(['input.prompt', 'input.automation', 'run.queued', 'run.dequeued', 'output.thinking'])
-const RUN_FINISHED = new Set(['run.completed', 'run.failed', 'run.cancelled'])
+const RUN_ACTIVITY = new Set([...USER_TYPES, 'run.queued', 'run.dequeued', 'output.message'])
+const RUN_FINISHED = new Set(['run.completed', 'run.failed', 'run.cancelled', 'control.interrupt'])
 
 /**
  * Pull readable text out of a row.
@@ -34,8 +34,10 @@ const RUN_FINISHED = new Set(['run.completed', 'run.failed', 'run.cancelled'])
  */
 function rowText(row: ChatEventRow): string | null {
   const payload = row.payload
-  if (row.eventType === 'output.error' || row.eventType === 'run.failed' || row.eventType === 'run.cancelled') {
-    return markdownToPlainText(payload?.error ?? (row.eventType === 'run.cancelled' ? 'Run cancelled' : 'Run failed'))
+  if (row.eventType === 'input.rejected') return markdownToPlainText(payload?.error ?? 'Message rejected')
+  if (row.eventType === 'run.cancelled' || row.eventType === 'control.interrupt') return 'Run cancelled'
+  if (row.eventType === 'output.error' || row.eventType === 'run.failed') {
+    return markdownToPlainText(payload?.error ?? payload?.content ?? 'Run failed')
   }
   if (!payload) return null
 
@@ -46,7 +48,7 @@ function rowText(row: ChatEventRow): string | null {
         if (part.type === 'voice') return ['Voice message']
         return part.type === 'text' && typeof part.text === 'string' ? [part.text] : []
       })
-      return parts.join(' ').trim() || null
+      return parts.join(' ').trim() || (doc.parts.length ? 'Message' : null)
     }
   }
   return typeof payload.content === 'string' ? markdownToPlainText(payload.content) : null
@@ -63,9 +65,12 @@ export function toLensMessages(rows: readonly ChatEventRow[]): readonly LensMess
     rows.map((row) => row.revokesEventId).filter((id): id is string => id !== null),
   )
 
+  // The stored interrupt row carries its target in runId. The server can
+  // append a lifecycle cancellation for that same request later.
+  const interrupted = new Set(rows.filter(row => row.eventType === 'control.interrupt').map(row => row.runId))
   const messages: LensMessage[] = []
   for (const row of [...rows].sort((left, right) => left.seqId - right.seqId)) {
-    if (revoked.has(row.id)) continue
+    if (revoked.has(row.id) || (row.eventType === 'run.cancelled' && interrupted.has(row.runId))) continue
     const role: LensRole | null = USER_TYPES.has(row.eventType)
       ? 'user'
       : ASSISTANT_TYPES.has(row.eventType)
@@ -79,34 +84,15 @@ export function toLensMessages(rows: readonly ChatEventRow[]): readonly LensMess
   return messages
 }
 
-/**
- * Whether the newest run is still working.
- *
- * Decided per run rather than from the last row alone, because usage and
- * followup events are appended after a run has already finished.
- */
-export function isRunInProgress(rows: readonly ChatEventRow[]): boolean {
-  const latestByRun = new Map<string, { started: boolean; finished: boolean; seqId: number }>()
+export type TaskTarget = { kind: 'run' | 'event'; id: string }
 
-  for (const row of rows) {
-    if (row.runId === null) continue
-    if (!RUN_STARTED.has(row.eventType) && !RUN_FINISHED.has(row.eventType)) continue
-    const entry = latestByRun.get(row.runId) ?? {
-      started: false,
-      finished: false,
-      seqId: row.seqId,
-    }
-    if (RUN_FINISHED.has(row.eventType)) entry.finished = true
-    if (RUN_STARTED.has(row.eventType)) {
-      entry.started = true
-      entry.seqId = Math.max(entry.seqId, row.seqId)
-    }
-    latestByRun.set(row.runId, entry)
-  }
+/** An active run takes priority over inputs waiting behind it. */
+export function currentTask(rows: readonly ChatEventRow[]): TaskTarget | null {
+  const finished = new Set(rows.filter(row => RUN_FINISHED.has(row.eventType)).map(row => row.runId))
+  const run = rows.findLast(row => row.runId && RUN_ACTIVITY.has(row.eventType) && !finished.has(row.runId))
+  if (run?.runId) return { kind: 'run', id: run.runId }
 
-  let newest: { started: boolean; finished: boolean; seqId: number } | null = null
-  for (const entry of latestByRun.values()) {
-    if (entry.started && (!newest || entry.seqId > newest.seqId)) newest = entry
-  }
-  return newest !== null && newest.started && !newest.finished
+  const replaced = new Set(rows.map(row => row.revokesEventId))
+  const queued = rows.find(row => !row.runId && USER_TYPES.has(row.eventType) && !replaced.has(row.id))
+  return queued ? { kind: 'event', id: queued.id } : null
 }

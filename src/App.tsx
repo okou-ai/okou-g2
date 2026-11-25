@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalS
 import { DeviceAuth } from './auth'
 import { connectBridge, describeConnection, initialGlassesState, onDeviceStatus } from './glasses'
 import { LensController, type LensView } from './lens/controller'
-import { isRunInProgress, toLensMessages } from './lens/messages'
+import { currentTask, toLensMessages } from './lens/messages'
 import { DeviceChat, initialChat } from './sync/engine'
 
 export default function App({ auth }: { auth: DeviceAuth }) {
@@ -14,6 +14,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
   const [chat, setChat] = useState(initialChat)
   const [glasses, setGlasses] = useState(initialGlassesState)
   const messages = useMemo(() => toLensMessages(chat.rows), [chat.rows])
+  const task = useMemo(() => currentTask(chat.rows), [chat.rows])
 
   useLayoutEffect(() => {
     setChat(initialChat)
@@ -39,10 +40,9 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     : login.phase !== 'ready' ? 'Sign in on your phone'
     : chat.error ? 'Sync failed · tap to retry'
     : !chat.thread ? 'Opening conversation…'
-    : chat.syncing && !messages.length ? 'Loading messages…'
-    : isRunInProgress(chat.rows) ? 'Thinking…' : ''
+    : chat.syncing && !messages.length ? 'Loading messages…' : ''
   const view: LensView = { thread: userId ? chat.thread : null, messages: userId ? messages : [],
-    status, pending: chat.pending, canRecord: !!userId && !!chat.thread && !chat.error }
+    task: userId ? task : null, status, pending: chat.pending, canRecord: !!userId && !!chat.thread && !chat.error }
   const currentView = useRef(view)
   useLayoutEffect(() => {
     currentView.current = view
@@ -54,7 +54,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     let detach: (() => void) | undefined
     let lens: LensController | undefined
     const onError = (message: string) => {
-      if (!disposed) setGlasses((state) => ({ ...state, error: message }))
+      if (!disposed) setGlasses((state) => state.error === message ? state : { ...state, error: message })
     }
     void (async () => {
       const bridge = await connectBridge()
@@ -67,7 +67,9 @@ export default function App({ auth }: { auth: DeviceAuth }) {
         const client = engine.current
         if (!client) throw new Error('Sign in before sending a recording')
         return client.sendVoice(id, audio)
-      }, () => void engine.current?.refresh(), onError)
+      }, () => void engine.current?.refresh(), onError, async (thread, target) => {
+        await engine.current?.cancelTask(thread, target)
+      })
       controller.current = lens
       lens.update(currentView.current)
       await lens.start()
@@ -111,7 +113,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
       </section>
       <section className="card">
         <h2>On the glasses</h2>
-        <p>Tap to record. Tap again to send, or double-tap to discard. Swipe to read the conversation.</p>
+        <p>Tap to read the latest reply. Swipe to scroll it, or double-tap to go quiet. Tap again from the reader to record. Long-press for actions while reading or recording.</p>
         <p className="hint">Workspace <span className="mono">{orgId}</span></p>
         <button className="link" onClick={() => void auth.signOut()}>Sign out</button>
       </section>

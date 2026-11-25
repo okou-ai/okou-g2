@@ -93,6 +93,53 @@ describe('single-thread reader', () => {
   })
 })
 
+describe('cancel current task', () => {
+  it('sends the control for the current run or queued input only in the bound conversation', async () => {
+    const runId = crypto.randomUUID(), eventId = crypto.randomUUID()
+    const controlPosts: Record<string, unknown>[] = []
+    let thread = '', rows: ChatEventRow[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      const path = new URL(url).pathname
+      if (path === '/api/chat-threads') {
+        thread = JSON.parse(String(init.body)).clientThreadId
+        rows = [row(thread, 1, { runId, eventType: 'input.prompt' }),
+          row(thread, 2, { id: eventId, eventType: 'input.prompt' })]
+        return ok({ id: thread })
+      }
+      if (path.endsWith('/event-snapshot')) return fail(404, 'CHAT_EVENT_SNAPSHOT_NOT_FOUND')
+      if (path.endsWith('/event-rows')) {
+        const since = Number(new URL(url).searchParams.get('sinceSeqId'))
+        return tail(rows.filter(r => r.seqId > since), rows.at(-1))
+      }
+      if (path === '/api/chat/events') {
+        const body = JSON.parse(String(init.body))
+        controlPosts.push(body)
+        rows.push(body.interruptsRunId ? row(thread, 3, { runId, eventType: 'control.interrupt' })
+          : row(thread, 4, { revokesEventId: eventId, eventType: 'control.revoke' }))
+        return ok({ threadId: thread })
+      }
+      throw new Error('Unexpected route ' + path)
+    })
+    const chat = new DeviceChat(identity(), async () => 'fixture', () => {})
+    try {
+      await chat.start()
+      await expect(chat.cancelTask('other-thread', { kind: 'run', id: runId })).rejects.toThrow()
+      await chat.cancelTask(thread, { kind: 'event', id: eventId })
+      expect(controlPosts).toHaveLength(0)
+      await chat.cancelTask(thread, { kind: 'run', id: runId })
+      await chat.refresh()
+      await chat.cancelTask(thread, { kind: 'run', id: runId })
+      await chat.cancelTask(thread, { kind: 'event', id: eventId })
+      await chat.refresh()
+      await chat.cancelTask(thread, { kind: 'event', id: eventId })
+      expect(controlPosts).toEqual([
+        { threadId: thread, clientEventId: expect.any(String), interruptsRunId: runId },
+        { threadId: thread, clientEventId: expect.any(String), revokesEventId: eventId },
+      ])
+    } finally { chat.close() }
+  })
+})
+
 describe('voice delivery', () => {
   it('survives a lost send response, retries the exact clip on request, and reconciles its promoted input after reopening', async () => {
     const owner = identity(), file = crypto.randomUUID(), host = crypto.randomUUID()
