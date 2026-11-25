@@ -1,9 +1,7 @@
 import { API_BASE_URL, MAX_WAV_BYTES } from '../src/config'
+import { isPrivateAudioUrl } from '../src/api/private-audio'
 import { isUuid } from '../src/types'
 import { json } from './oauth'
-
-const ACCOUNT_HOST = '98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com'
-const PRIVATE_BUCKET = 'user-artifact-private-prod'
 
 /** The private bucket has no browser PUT CORS grant. Use only a URL issued
  * directly by Okou. The storage request never carries the user's bearer. */
@@ -22,10 +20,7 @@ export async function uploadVoice(request: Request): Promise<Response> {
   const { id, uploadUrl, uploadHeaders } = await prepared.json() as {
     id: string; uploadUrl: string; uploadHeaders?: Record<string, string>
   }
-  const url = new URL(uploadUrl)
-  if (!isUuid(id) || url.protocol !== 'https:' || url.username || url.password || url.port ||
-      !(url.hostname === PRIVATE_BUCKET + '.' + ACCOUNT_HOST ||
-        (url.hostname === ACCOUNT_HOST && url.pathname.startsWith('/' + PRIVATE_BUCKET + '/')))) {
+  if (!isUuid(id) || !isPrivateAudioUrl(uploadUrl)) {
     return json({ error: 'invalid_upload_target' }, 502)
   }
   const bytes = await request.arrayBuffer()

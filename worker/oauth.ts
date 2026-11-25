@@ -1,8 +1,6 @@
-import { decodeJwt } from 'jose'
 import { DEVICE_SCOPE, OAUTH_ISSUER } from '../src/config'
+import { DEVICE_GRANT, deviceCodeHash, parseDeviceCode, parseSession } from '../src/device-protocol'
 import type { DeviceCode, DeviceSession } from '../src/types'
-
-const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
 
 export function json(data: unknown, status = 200, cookie?: string) {
   const headers = new Headers({ 'cache-control': 'no-store' })
@@ -16,26 +14,6 @@ function clerk(path: string, params: Record<string, string>) {
     body: new URLSearchParams(params),
     redirect: 'manual',
   })
-}
-
-async function deviceCodeHash(code: string) {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(code))
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
-}
-
-function parseSession(body: Record<string, unknown>, clientId: string): DeviceSession {
-  if (typeof body.access_token !== 'string' || String(body.token_type).toLowerCase() !== 'bearer') {
-    throw new Error('Invalid access token')
-  }
-  // Read only the fresh token returned by the issuer over HTTPS. Okou API
-  // performs signature, audience, scope and workspace membership checks.
-  const { sub, org_id, exp, client_id } = decodeJwt(body.access_token)
-  if (client_id !== clientId || !sub?.startsWith('user_') ||
-      typeof org_id !== 'string' || !org_id.startsWith('org_') ||
-      typeof exp !== 'number' || exp * 1000 <= Date.now()) {
-    throw new Error('Authorize again and select a workspace')
-  }
-  return { accessToken: body.access_token, userId: sub, orgId: org_id, expiresAt: exp * 1000 }
 }
 
 export async function auth(request: Request, action: string, clientId: string): Promise<Response> {
@@ -61,14 +39,11 @@ export async function auth(request: Request, action: string, clientId: string): 
   if (action === 'device') {
     const response = await clerk('/oauth/device_authorization', { client_id: clientId, scope: DEVICE_SCOPE })
     if (!response.ok) return json({ error: 'device_authorization_failed' }, 502)
-    const d = await response.json() as DeviceCode
-    const url = new URL(d.verification_uri)
-    const interval = d.interval ?? 5
-    if (!d.device_code || !d.user_code || url.protocol !== 'https:' || url.username || url.password ||
-        !Number.isSafeInteger(d.expires_in) || d.expires_in <= 0 ||
-        !Number.isSafeInteger(interval) || interval <= 0) return json({ error: 'invalid_device_code' }, 502)
-    return json({ device_code: d.device_code, user_code: d.user_code, verification_uri: url.href,
-      expires_in: d.expires_in, interval })
+    try {
+      return json(parseDeviceCode(await response.json() as DeviceCode))
+    } catch {
+      return json({ error: 'invalid_device_code' }, 502)
+    }
   }
   let params: Record<string, string>
   if (action === 'refresh') {

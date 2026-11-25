@@ -1,4 +1,5 @@
 import type { DeviceCode, DeviceSession } from './types'
+import { AuthError, InstalledGrant } from './installed-grant'
 
 interface Challenge extends DeviceCode {
   expiresAt: number
@@ -14,27 +15,17 @@ export type LoginState =
 const CHALLENGE = 'okou-g2/device-code'
 const SIGNED_OUT = 'okou-g2/signed-out'
 
-class AuthError extends Error {
-  constructor(readonly code: string, readonly status: number) { super(code) }
-}
-
-async function post<T>(action: string, params: object = {}): Promise<T> {
-  const response = await fetch('/api/auth/' + action, {
-    method: 'POST', credentials: 'same-origin', cache: 'no-store',
-    headers: { 'content-type': 'application/json' }, body: JSON.stringify(params),
-  })
-  const data = await response.json() as { error?: string }
-  if (!response.ok) throw new AuthError(data.error ?? 'invalid_response', response.status)
-  return data as T
-}
-
-// A second tab must see the Set-Cookie from an earlier refresh before using
-// the rotating refresh token. The normal Even App has a single WebView.
+// Serialize token rotation across tabs, or inside a single older WebView.
+let localGrants = Promise.resolve()
 function grantLock<T>(work: () => Promise<T>): Promise<T> {
-  return navigator.locks ? navigator.locks.request('okou-g2/oauth', work) : work()
+  if (navigator.locks) return navigator.locks.request('okou-g2/oauth', work)
+  const result = localGrants.then(work)
+  localGrants = result.then(() => {}, () => {})
+  return result
 }
 
 export class DeviceAuth {
+  constructor(private readonly grants = new InstalledGrant()) {}
   private state: LoginState = { phase: 'loading' }
   private listeners = new Set<() => void>()
   private revision = 0
@@ -59,7 +50,7 @@ export class DeviceAuth {
     try {
       if (!localStorage.getItem(SIGNED_OUT)) {
         try {
-          const session = await grantLock(() => post<DeviceSession>('refresh'))
+          const session = await grantLock(() => this.grants.refresh())
           if (this.revision !== revision) return
           this.accept(session)
           return
@@ -88,20 +79,20 @@ export class DeviceAuth {
     clearTimeout(this.timer)
     this.set({ phase: 'loading' })
     try {
-      const code = await post<DeviceCode>('device')
+      const code = await this.grants.device()
       if (revision !== this.revision) return
       this.wait({ ...code, expiresAt: Date.now() + code.expires_in * 1000, nextPollAt: Date.now() + code.interval * 1000 }, revision)
     } catch (error) {
       if (this.revision !== revision) return
-      const message = error instanceof AuthError && error.code === 'device_client_not_configured'
-        ? 'The G2 OAuth client has not been configured.'
+      const message = error instanceof TypeError && typeof location !== 'undefined'
+        ? 'Could not reach clerk.okou.ai from ' + location.origin + '.'
         : 'Could not start device sign-in. Try again.'
       this.set({ phase: 'signed-out', error: message })
     }
   }
 
   private wait(challenge: Challenge, revision: number) {
-    sessionStorage.setItem(CHALLENGE, JSON.stringify(challenge))
+    try { sessionStorage.setItem(CHALLENGE, JSON.stringify(challenge)) } catch { /* The open page can still poll. */ }
     this.set({ phase: 'verify', challenge })
     this.timer = setTimeout(() => void this.poll(challenge, revision),
       Math.max(0, Math.min(challenge.nextPollAt, challenge.expiresAt) - Date.now()))
@@ -114,7 +105,7 @@ export class DeviceAuth {
       try {
         const session = await grantLock(async () => {
           if (revision !== this.revision || this.state.phase !== 'verify') throw new Error('Cancelled')
-          return post<DeviceSession>('token', { device_code: challenge.device_code })
+          return this.grants.token(challenge.device_code)
         })
         if (revision === this.revision) this.accept(session)
         return
@@ -122,7 +113,7 @@ export class DeviceAuth {
         if (revision !== this.revision || this.state.phase !== 'verify') return
         const code = error instanceof AuthError ? error.code : ''
         if (code === 'authorization_pending' || code === 'slow_down' ||
-            !(error instanceof AuthError) || error.status >= 500) {
+            !(error instanceof AuthError) || error.status === 429 || error.status >= 500) {
           const interval = code === 'authorization_pending' ? challenge.interval : Math.min(60, challenge.interval + 5)
           this.wait({ ...challenge, interval, nextPollAt: Date.now() + interval * 1000 }, revision)
           return
@@ -155,7 +146,7 @@ export class DeviceAuth {
     }
     if (current.session.expiresAt > Date.now() + 30_000) return current.session.accessToken
     const revision = this.revision
-    this.refreshing ??= grantLock(() => post<DeviceSession>('refresh')).finally(() => { this.refreshing = null })
+    this.refreshing ??= grantLock(() => this.grants.refresh()).finally(() => { this.refreshing = null })
     let next: DeviceSession
     try {
       next = await this.refreshing
@@ -174,11 +165,11 @@ export class DeviceAuth {
   async signOut() {
     const revision = ++this.revision
     clearTimeout(this.timer)
-    localStorage.setItem(SIGNED_OUT, '1')
-    sessionStorage.removeItem(CHALLENGE)
+    try { localStorage.setItem(SIGNED_OUT, '1') } catch { /* A memory-only session can still sign out. */ }
+    try { sessionStorage.removeItem(CHALLENGE) } catch { /* Revocation still proceeds. */ }
     this.set({ phase: 'loading' })
     try {
-      await grantLock(() => post('logout'))
+      await grantLock(() => this.grants.logout())
       if (revision === this.revision) this.set({ phase: 'signed-out' })
     } catch {
       if (revision === this.revision) this.set({ phase: 'signed-out', error: 'Signed out locally. Remote revocation could not be confirmed.' })

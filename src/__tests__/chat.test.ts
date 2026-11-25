@@ -143,10 +143,11 @@ describe('cancel current task', () => {
 describe('voice delivery', () => {
   it('survives a lost send response, retries the exact clip on request, and reconciles its promoted input after reopening', async () => {
     const owner = identity(), file = crypto.randomUUID(), host = crypto.randomUUID()
+    const uploadUrl = 'https://user-artifact-private-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com/clip'
     let thread = '', uploads = 0, rows: ChatEventRow[] = []
     const posts: Record<string, unknown>[] = []
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
-      const path = new URL(url, 'https://g2.okou.ai').pathname
+      const path = new URL(url).pathname
       if (path === '/api/chat-threads') { thread = JSON.parse(String(init.body)).clientThreadId; return ok({ id: thread }) }
       if (path.endsWith('/metadata')) return ok({ ...meta(thread), computerUseHostId: host, cloudBrowserEnabled: false })
       if (path.endsWith('/event-snapshot')) return fail(404, 'CHAT_EVENT_SNAPSHOT_NOT_FOUND')
@@ -154,7 +155,16 @@ describe('voice delivery', () => {
         const since = Number(new URL(url).searchParams.get('sinceSeqId'))
         return tail(rows.filter((r) => r.seqId > since), rows.at(-1))
       }
-      if (path === '/api/voice') { uploads++; return ok({ id: file }) }
+      if (path === '/api/uploads/prepare/private') return ok({ id: file, uploadUrl, uploadHeaders: { 'x-amz-meta-clip': 'g2' } })
+      if (url === uploadUrl) {
+        uploads++
+        expect(init.method).toBe('PUT')
+        expect(init.credentials).toBe('omit')
+        expect(new Headers(init.headers).has('authorization')).toBe(false)
+        expect(new Headers(init.headers).get('x-amz-meta-clip')).toBe('g2')
+        return new Response(null, { status: 200 })
+      }
+      if (path === '/api/uploads/complete') return ok({ id: file })
       if (path === '/api/chat/events') {
         posts.push(JSON.parse(String(init.body))); throw new TypeError('Lost response')
       }

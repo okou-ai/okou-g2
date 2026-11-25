@@ -6,7 +6,7 @@ Speak to a dedicated Okou conversation from Even G2 glasses and read replies on 
 
 Use the Even Hub Beta package for all product validation on the glasses. Accept the tester invitation, then open **Me → Beta tester → Okou → Install** in the Even Realities app using the invited account. Open Okou from the glasses launcher. [Even Hub Beta testing](https://hub.evenrealities.com/docs/test/beta-testing)
 
-Version 0.4.1 can be installed, but sign-in stops at **Could not start device sign-in**. That build sends `/api/auth/device` to the package’s own origin. End-to-end validation requires a Beta that can sign in from the installed WebView.
+Version 0.4.2 starts device sign-in directly at Clerk. After approval, the phone opens the conversation through the production Okou API. If the WebView cannot reach this API, the phone displays its origin for diagnosing CORS. Product acceptance covers the installed Beta on a paired phone and glasses.
 
 ## Sign in and use the glasses
 
@@ -19,17 +19,17 @@ Version 0.4.1 can be installed, but sign-in stops at **Could not start device si
 
 ## Device protocol
 
-The OAuth client uses Clerk's device authorization grant and requests `openid profile offline_access user:org:read okou:chat:read okou:chat:send`. The G2 Worker exchanges grants with the production issuer at `https://clerk.okou.ai`. The short-lived access token stays in memory. The rotating refresh token is scoped to the host in a Secure, HttpOnly, SameSite=Strict cookie. Grant operations accept same-origin POSTs. The pending code is tab-local and survives a reload while approval is open.
+The installed public client uses Clerk's device authorization grant at `https://clerk.okou.ai` and requests `openid profile offline_access user:org:read okou:chat:read okou:chat:send`. The access token stays in memory. The package seals the rotating refresh token with a non-extractable AES-GCM key and stores the record in IndexedDB. Reopening with access to the same store restores the session. A new WebView origin or unavailable storage may require signing in again. The pending device code is tab-local.
 
 IndexedDB reserves a UUID before sending `POST /api/chat-threads`. A lost creation response reuses the reservation. An established binding is replaced only when its metadata returns 404 or 410. Clearing the WebView's site data removes its local binding.
 
-Voice capture produces a 16 kHz mono PCM16 WAV. The same-origin Worker prepares a private upload at the Okou API, PUTs the recording to the returned R2 URL with its signed headers, and completes the upload. The private bucket requires a server-side PUT from this origin. The client sends the resulting file ID as a version-1 voice part in the bound thread, preserving its current computer host and cloud browser settings. The event IDs, file ID and target settings are saved before submission. If the result is uncertain, the client reconciles the original input or its promoted row from history. The phone's explicit retry reuses that exact request.
+Voice capture produces a 16 kHz mono PCM16 WAV. The package prepares a private upload at `api.okou.ai`, PUTs the recording to the signed private R2 URL and completes the upload at the Okou API. The installed origin needs CORS access to the Bearer API and signed PUT. The client sends the resulting file ID as a version-1 voice part in the bound thread, preserving its current computer host and cloud browser settings. The event IDs, file ID and target settings are saved before submission. If the result is uncertain, the client reconciles the original input or its promoted row from history. The phone's explicit retry reuses that exact request.
 
 The reader follows a signed NDJSON snapshot and paired event/sequence cursors. It keeps the 200 most recent presentation and run-lifecycle rows in memory. Ably subscriptions on `user-org:<user>:<org>` wake only the bound thread for message/detail changes. Attachment, app resume, and reconnect trigger catch-up. While realtime is unavailable the foreground app also checks every 30 seconds.
 
 ## Development
 
-Use the public client ID of a Clerk application with the device grant, refresh tokens, workspace selection and Okou chat scopes. Set the Worker's `OAUTH_CLIENT_ID` in `wrangler.jsonc` for deployment. For a local override, copy `.dev.vars.example` to `.dev.vars`. The production client requires no client secret.
+The packaged client uses the Clerk public client ID in `src/config.ts`. The legacy Worker's `OAUTH_CLIENT_ID` is configured separately in `wrangler.jsonc`. For a local Worker override, copy `.dev.vars.example` to `.dev.vars`.
 
 ```sh
 npm ci
