@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { markdownToPlainText } from '../lens/markdown'
-import { isRunInProgress, toLensMessages } from '../lens/messages'
+import { currentTask, toLensMessages } from '../lens/messages'
 import { paginate } from '../lens/screens'
 import type { ChatEventRow } from '../types'
 
@@ -41,6 +41,15 @@ describe('toLensMessages', () => {
     expect(messages[0]?.text).toBe('Voice message')
   })
 
+  it('preserves the user turn for an attachment-only message and replaces a rejected input with its error', () => {
+    const prompt = row({ id: 'file', seqId: 1, eventType: 'input.prompt',
+      payload: { userMessage: { parts: [{ type: 'file', fileId: 'fixture' }] } } })
+    expect(toLensMessages([prompt]).at(-1)?.role).toBe('user')
+    const denied = row({ id: 'rejected', seqId: 2, revokesEventId: 'file', eventType: 'input.rejected',
+      payload: { error: 'Upload unavailable' } })
+    expect(toLensMessages([prompt, denied])).toEqual([{ id: 'rejected', seqId: 2, role: 'assistant', text: 'Upload unavailable' }])
+  })
+
   it('keeps user and assistant text in sequence order', () => {
     const messages = toLensMessages([
       row({
@@ -61,6 +70,12 @@ describe('toLensMessages', () => {
       { id: 'a', role: 'user', text: 'Hello', seqId: 1 },
       { id: 'b', role: 'assistant', text: 'Hi there', seqId: 2 },
     ])
+  })
+
+  it('reflects a confirmed interrupt once even if its lifecycle cancellation arrives later', () => {
+    const rows = [row({ id: 'i', seqId: 1, eventType: 'control.interrupt', runId: 'target' }),
+      row({ id: 'c', seqId: 2, eventType: 'run.cancelled', runId: 'target' })]
+    expect(toLensMessages(rows)).toEqual([{ id: 'i', seqId: 1, role: 'assistant', text: 'Run cancelled' }])
   })
 
   it('drops an event that a later event revoked', () => {
@@ -93,43 +108,23 @@ describe('toLensMessages', () => {
   })
 })
 
-describe('isRunInProgress', () => {
-  it('shows thinking for a direct send that has a run but never entered the queue', () => {
-    expect(isRunInProgress([row({ id: 'input', seqId: 1, runId: 'run-1', eventType: 'input.prompt' })])).toBe(true)
+describe('currentTask', () => {
+  it('targets a direct run or the active run ahead of queued input', () => {
+    const run = row({ id: 'r', seqId: 1, runId: 'run-1', eventType: 'input.prompt' })
+    const queued = row({ id: 'q', seqId: 2, eventType: 'input.prompt' })
+    expect(currentTask([run, queued])).toEqual({ kind: 'run', id: 'run-1' })
+    const finished = row({ id: 'c', seqId: 3, runId: 'run-1', eventType: 'run.completed' })
+    expect(currentTask([run, queued, finished])).toEqual({ kind: 'event', id: 'q' })
+    expect(currentTask([run, queued, finished, row({ id: 'revoke', seqId: 4, eventType: 'control.revoke', revokesEventId: 'q' })])).toBeNull()
   })
 
-  it('is true while a run has started but not finished', () => {
-    expect(
-      isRunInProgress([row({ id: 'q', seqId: 1, runId: 'run-1', eventType: 'run.queued' })]),
-    ).toBe(true)
-  })
-
-  it('is false once the run reaches a terminal event', () => {
-    expect(
-      isRunInProgress([
-        row({ id: 'q', seqId: 1, runId: 'run-1', eventType: 'run.queued' }),
-        row({ id: 'c', seqId: 2, runId: 'run-1', eventType: 'run.completed' }),
-      ]),
-    ).toBe(false)
-  })
-
-  it('stays false when trailing events are appended after completion', () => {
-    expect(
-      isRunInProgress([
-        row({ id: 'q', seqId: 1, runId: 'run-1', eventType: 'run.queued' }),
-        row({ id: 'c', seqId: 2, runId: 'run-1', eventType: 'run.completed' }),
-        row({ id: 'u', seqId: 3, runId: 'run-1', eventType: 'usage.recorded' }),
-      ]),
-    ).toBe(false)
-  })
-
-  it('tracks the newest run, not an older finished one', () => {
-    expect(
-      isRunInProgress([
-        row({ id: 'a', seqId: 1, runId: 'run-1', eventType: 'run.queued' }),
-        row({ id: 'b', seqId: 2, runId: 'run-1', eventType: 'run.completed' }),
-        row({ id: 'c', seqId: 3, runId: 'run-2', eventType: 'run.queued' }),
-      ]),
-    ).toBe(true)
+  it('tracks a promoted input and clears it on completion despite trailing activity', () => {
+    const queued = row({ id: 'q', seqId: 1, eventType: 'input.prompt' })
+    const promoted = row({ id: 'p', seqId: 2, eventType: 'input.prompt', runId: 'run-2', revokesEventId: 'q' })
+    expect(currentTask([queued, promoted])).toEqual({ kind: 'run', id: 'run-2' })
+    expect(currentTask([queued, promoted,
+      row({ id: 'c', seqId: 3, eventType: 'run.cancelled', runId: 'run-2' }),
+      row({ id: 'u', seqId: 4, eventType: 'usage.recorded', runId: 'run-2' }),
+    ])).toBeNull()
   })
 })

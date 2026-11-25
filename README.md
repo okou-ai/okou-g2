@@ -6,8 +6,10 @@ Speak to a dedicated Okou conversation from Even G2 glasses and read replies on 
 
 1. Select **Sign in with Okou** on the phone. Open the displayed authorization page in a browser, enter the device code, choose a workspace and return to the Even App.
 2. The first sign-in creates a conversation titled **Even G2**. Opening the app again on the same installation restores that conversation. Each Okou account and workspace has its own binding.
-3. Tap the glasses to record, then tap again to send. Double-tap during capture to discard it. At the one-minute limit the microphone closes and the recording waits for a tap to send.
-4. Read committed assistant replies on the lens. Swipe forward or backward through long replies and earlier messages. Double-tap from the reader to exit. Use **Sign out** on the phone to change account or workspace.
+3. The lens starts quiet. A steady dot in the upper right means a reply is unread. A pulsing dot means Okou is working. Tap to open the latest reply. When the latest message is yours, the reader shows **Thinking...** until an answer arrives.
+4. Swipe to scroll within the displayed reply. Double-tap to go quiet, or leave the reader idle for 30 seconds. A long press opens **Cancel current task**, **Back to main menu** (the glasses launcher), and **Back to Okou** (the reader).
+5. Tap from the reader to record. **Listening...** appears at the lower right. Tap to send or double-tap to discard. A long press offers the same two actions. At the one-minute limit the microphone closes and the recording waits for your decision. The public G2 SDK provides microphone audio, so Okou sends the recording without a live transcript.
+6. Use **Sign out** on the phone to change account or workspace.
 
 ## Device protocol
 

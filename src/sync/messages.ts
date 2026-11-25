@@ -9,8 +9,8 @@ export interface History {
 type Snapshot = ChatEventCursor & { url: string }
 type Tail = { rows: ChatEventRow[]; cursor: ChatEventCursor; hasMore: boolean }
 const START: ChatEventCursor = { lastSeqId: 0, lastEventId: null }
-const KEEP = new Set(['input.prompt', 'input.automation', 'input.rejected', 'input.budget',
-  'output.message', 'output.error', 'run.queued', 'run.dequeued', 'run.completed', 'run.failed', 'run.cancelled'])
+const KEEP = new Set(['input.prompt', 'input.automation', 'input.rejected', 'input.budget', 'input.goal',
+  'output.message', 'output.error', 'control.interrupt', 'run.queued', 'run.dequeued', 'run.completed', 'run.failed', 'run.cancelled'])
 
 async function readArchive(response: Response, consume: (row: ChatEventRow) => void) {
   if (!response.body) throw new Error('Missing chat archive')
