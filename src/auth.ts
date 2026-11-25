@@ -1,5 +1,6 @@
 import type { DeviceCode, DeviceSession } from './types'
 import { AuthError, InstalledGrant } from './installed-grant'
+import { exclusive } from './install-storage'
 import { version } from '../app.json'
 
 interface Challenge extends DeviceCode {
@@ -26,15 +27,6 @@ function deviceStartError(error: unknown) {
   return 'Device sign-in failed (HTTP ' + error.status + reason + '). ' + build
 }
 
-// Serialize token rotation across tabs, or inside a single older WebView.
-let localGrants = Promise.resolve()
-function grantLock<T>(work: () => Promise<T>): Promise<T> {
-  if (navigator.locks) return navigator.locks.request('okou-g2/oauth', work)
-  const result = localGrants.then(work)
-  localGrants = result.then(() => {}, () => {})
-  return result
-}
-
 export class DeviceAuth {
   constructor(private readonly grants = new InstalledGrant()) {}
   private state: LoginState = { phase: 'loading' }
@@ -59,9 +51,11 @@ export class DeviceAuth {
     clearTimeout(this.timer)
     this.set({ phase: 'loading' })
     try {
-      if (!localStorage.getItem(SIGNED_OUT)) {
+      let signedOut = false
+      try { signedOut = !!localStorage.getItem(SIGNED_OUT) } catch { /* Even's install store is independent. */ }
+      if (!signedOut || await this.grants.hasInstalledSession()) {
         try {
-          const session = await grantLock(() => this.grants.refresh())
+          const session = await exclusive('okou-g2/oauth', () => this.grants.refresh())
           if (this.revision !== revision) return
           this.accept(session)
           return
@@ -111,7 +105,7 @@ export class DeviceAuth {
     let message = 'This device code expired. Start sign-in again.'
     if (Date.now() < challenge.expiresAt) {
       try {
-        const session = await grantLock(async () => {
+        const session = await exclusive('okou-g2/oauth', async () => {
           if (revision !== this.revision || this.state.phase !== 'verify') throw new Error('Cancelled')
           return this.grants.token(challenge.device_code)
         })
@@ -154,7 +148,7 @@ export class DeviceAuth {
     }
     if (current.session.expiresAt > Date.now() + 30_000) return current.session.accessToken
     const revision = this.revision
-    this.refreshing ??= grantLock(() => this.grants.refresh()).finally(() => { this.refreshing = null })
+    this.refreshing ??= exclusive('okou-g2/oauth', () => this.grants.refresh()).finally(() => { this.refreshing = null })
     let next: DeviceSession
     try {
       next = await this.refreshing
@@ -177,7 +171,7 @@ export class DeviceAuth {
     try { sessionStorage.removeItem(CHALLENGE) } catch { /* Revocation still proceeds. */ }
     this.set({ phase: 'loading' })
     try {
-      await grantLock(() => this.grants.logout())
+      await exclusive('okou-g2/oauth', () => this.grants.logout())
       if (revision === this.revision) this.set({ phase: 'signed-out' })
     } catch {
       if (revision === this.revision) this.set({ phase: 'signed-out', error: 'Signed out locally. Remote revocation could not be confirmed.' })

@@ -6,6 +6,7 @@ export interface Identity {
 export interface DeviceSession extends Identity {
   readonly accessToken: string
   readonly expiresAt: number
+  readonly temporary?: boolean
 }
 
 export interface DeviceCode {

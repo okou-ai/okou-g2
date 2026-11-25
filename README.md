@@ -19,9 +19,9 @@ The installed Beta requests a device code directly from Clerk. If this step fail
 
 ## Device protocol
 
-The installed public client uses Clerk's device authorization grant at `https://clerk.okou.ai` and requests `openid profile offline_access user:org:read okou:chat:read okou:chat:send`. The access token stays in memory. The package seals the rotating refresh token with a non-extractable AES-GCM key and stores the record in IndexedDB. Reopening with access to the same store restores the session. A new WebView origin or unavailable storage may require signing in again. The pending device code is tab-local.
+The installed public client uses Clerk's device authorization grant at `https://clerk.okou.ai` and requests `openid profile offline_access user:org:read okou:chat:read okou:chat:send`. The access token stays in memory. The package encrypts the rotating refresh token with AES-GCM. Deriving the wrapping key requires both a random seed in Even's package storage and a random share in a first-party, host-only cookie. The cookie spans the loopback ports Even assigns on launch. Restoring the session requires both stores. Signing out clears the local grant and asks Clerk to revoke it. The pending device code is tab-local.
 
-IndexedDB reserves a UUID before sending `POST /api/chat-threads`. A lost creation response reuses the reservation. An established binding is replaced only when its metadata returns 404 or 410. Clearing the WebView's site data removes its local binding.
+Even's package storage keeps a conversation binding per Okou account and workspace. The client reserves the thread ID before sending `POST /api/chat-threads` and reuses it after a lost response. An established binding is replaced only when its metadata returns 404 or 410. During the upgrade from 0.4.3 the client can import the old IndexedDB grant and binding if it opens on the old origin. If that origin is unavailable, one new sign-in and conversation may be needed. Development browsers without the Even bridge continue to use IndexedDB.
 
 Voice capture produces a 16 kHz mono PCM16 WAV. The package prepares a private upload at `api.okou.ai`, PUTs the recording to the signed private R2 URL and completes the upload at the Okou API. The installed origin needs CORS access to the Bearer API and signed PUT. The client sends the resulting file ID as a version-1 voice part in the bound thread, preserving its current computer host and cloud browser settings. The event IDs, file ID and target settings are saved before submission. If the result is uncertain, the client reconciles the original input or its promoted row from history. The phone's explicit retry reuses that exact request.
 
@@ -49,7 +49,7 @@ npm run build
 npm exec --yes --package=@evenrealities/evenhub-cli@0.2.0 -- evenhub pack app.json dist -o okou.ehpk --sdk-ver 0.0.15
 ```
 
-Upload `okou.ehpk` to the Okou project in Even Hub and publish that version to the Beta channel. Install the published version on the paired phone to verify sign-in, session restoration after reopening the Even app, and sending a recording and receiving the reply on the lens.
+Upload `okou.ehpk` to the Okou project in Even Hub and publish that version to the Beta channel. For the session check, sign in, note the conversation ID, fully close the Even app and reopen the Beta on a different loopback port. Confirm it opens the same conversation and that an explicit sign-out persists after another reopen. For the voice check, send a recording and verify the reply on the lens.
 
 ## G2 Worker
 
