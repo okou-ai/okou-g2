@@ -7,9 +7,4 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
   },
-  server: {
-    // Even App loads the dev server from the phone over the LAN.
-    host: true,
-    port: 5173,
-  },
 })

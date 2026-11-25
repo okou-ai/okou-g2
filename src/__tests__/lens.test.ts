@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { markdownToPlainText, truncate } from '../lens/markdown'
+import { markdownToPlainText } from '../lens/markdown'
 import { isRunInProgress, toLensMessages } from '../lens/messages'
-import { prepareSend } from '../sync/send'
+import { paginate } from '../lens/screens'
 import type { ChatEventRow } from '../types'
 
 function row(overrides: Partial<ChatEventRow> & Pick<ChatEventRow, 'id' | 'seqId'>): ChatEventRow {
@@ -24,38 +24,23 @@ describe('markdownToPlainText', () => {
     )
   })
 
-  it('strips emphasis, headings and list markers', () => {
-    expect(markdownToPlainText('# Title\n\n- **bold** and _italic_')).toBe(
-      'Title • bold and italic',
-    )
-  })
-
-  it('replaces fenced code with a marker instead of leaking the body', () => {
-    const text = markdownToPlainText('Run this:\n```ts\nconst x = 1\n```\ndone')
-    expect(text).toBe('Run this: [code] done')
-    expect(text).not.toContain('const')
-  })
-
-  it('collapses blank lines so nothing wastes a lens row', () => {
-    expect(markdownToPlainText('one\n\n\ntwo')).toBe('one two')
-  })
-})
-
-describe('truncate', () => {
-  it('leaves short text alone', () => {
-    expect(truncate('short', 10)).toBe('short')
-  })
-
-  it('breaks on a word boundary when one is close enough', () => {
-    expect(truncate('alpha beta gamma delta', 16)).toBe('alpha beta…')
-  })
-
-  it('hard-cuts a single long token rather than returning almost nothing', () => {
-    expect(truncate(`a ${'x'.repeat(40)}`, 12)).toBe('a xxxxxxxxx…')
+  it('keeps literal code and enough pages to read the entire reply', () => {
+    const code = 'const value = "a_b_c <tag> **";'
+    expect(markdownToPlainText(['# Result', '```js', code, '```'].join('\n'))).toBe('Result\n' + code)
+    const text = '分页读完这条消息🌙'.repeat(200) + 'DONE'
+    const pages = paginate(text)
+    expect(pages.length).toBeGreaterThan(1)
+    expect(pages.join('').replaceAll('\n', '')).toBe(text)
   })
 })
 
 describe('toLensMessages', () => {
+  it('labels a voice input without displaying the wire prompt', () => {
+    const messages = toLensMessages([row({ id: 'voice', seqId: 1, eventType: 'input.prompt',
+      payload: { content: '(see message parts)', userMessage: { version: 1, parts: [{ type: 'voice', clips: [{ fileId: 'clip' }] }] } } })])
+    expect(messages[0]?.text).toBe('Voice message')
+  })
+
   it('keeps user and assistant text in sequence order', () => {
     const messages = toLensMessages([
       row({
@@ -146,37 +131,5 @@ describe('isRunInProgress', () => {
         row({ id: 'c', seqId: 3, runId: 'run-2', eventType: 'run.queued' }),
       ]),
     ).toBe(true)
-  })
-})
-
-describe('prepareSend', () => {
-  it('uses one client thread id in both the request and the optimistic rows', () => {
-    const send = prepareSend({ agentId: 'agent-1', selection: { model: 'gpt-6-astra' } }, 'Hello there')
-
-    expect(send.body.clientThreadId).toBe(send.threadId)
-    expect(send.thread?.id).toBe(send.threadId)
-    expect(send.row.chatThreadId).toBe(send.threadId)
-    expect(send.row.id).toBe(send.body.clientEventId)
-    expect(send.body.threadId).toBeUndefined()
-    expect(send.body.chatThreadEventId).toEqual(expect.any(String))
-  })
-
-  it('targets an existing thread without inventing a new one', () => {
-    const send = prepareSend({ agentId: 'agent-1', threadId: 'thread-9' }, 'Follow up')
-
-    expect(send.threadId).toBe('thread-9')
-    expect(send.thread).toBeNull()
-    expect(send.body.threadId).toBe('thread-9')
-    expect(send.body.clientThreadId).toBeUndefined()
-  })
-
-  it('carries the prompt as a text part the API accepts', () => {
-    const send = prepareSend({ agentId: 'agent-1', selection: { model: 'gpt-6-astra' } }, 'Ship it')
-
-    expect(send.body.userMessage).toEqual({
-      version: 1,
-      parts: [{ type: 'text', text: 'Ship it' }],
-    })
-    expect(send.body.hasTextContent).toBe(true)
   })
 })

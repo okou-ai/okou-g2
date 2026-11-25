@@ -1,0 +1,2 @@
+# A public Clerk client with the device grant enabled. No client secret.
+OAUTH_CLIENT_ID=your_public_device_client_id

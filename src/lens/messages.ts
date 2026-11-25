@@ -39,20 +39,17 @@ function rowText(row: ChatEventRow): string | null {
   }
   if (!payload) return null
 
-  if (typeof payload.content === 'string' && payload.content.length > 0) {
-    return markdownToPlainText(payload.content)
+  if (USER_TYPES.has(row.eventType)) {
+    const doc = payload.userMessage as { parts?: { type?: string; text?: string }[] } | undefined
+    if (Array.isArray(doc?.parts)) {
+      const parts = doc.parts.flatMap((part) => {
+        if (part.type === 'voice') return ['Voice message']
+        return part.type === 'text' && typeof part.text === 'string' ? [part.text] : []
+      })
+      return parts.join(' ').trim() || null
+    }
   }
-
-  const document = payload.userMessage as
-    | { parts?: readonly { type?: string; text?: string }[] }
-    | undefined
-  const parts = document?.parts
-  if (!Array.isArray(parts)) return null
-  const text = parts
-    .filter((part) => part.type === 'text' && typeof part.text === 'string')
-    .map((part) => part.text as string)
-    .join(' ')
-  return text.length > 0 ? markdownToPlainText(text) : null
+  return typeof payload.content === 'string' ? markdownToPlainText(payload.content) : null
 }
 
 /**
@@ -99,15 +96,17 @@ export function isRunInProgress(rows: readonly ChatEventRow[]): boolean {
       finished: false,
       seqId: row.seqId,
     }
-    if (RUN_STARTED.has(row.eventType)) entry.started = true
     if (RUN_FINISHED.has(row.eventType)) entry.finished = true
-    entry.seqId = Math.max(entry.seqId, row.seqId)
+    if (RUN_STARTED.has(row.eventType)) {
+      entry.started = true
+      entry.seqId = Math.max(entry.seqId, row.seqId)
+    }
     latestByRun.set(row.runId, entry)
   }
 
   let newest: { started: boolean; finished: boolean; seqId: number } | null = null
   for (const entry of latestByRun.values()) {
-    if (!newest || entry.seqId > newest.seqId) newest = entry
+    if (entry.started && (!newest || entry.seqId > newest.seqId)) newest = entry
   }
   return newest !== null && newest.started && !newest.finished
 }

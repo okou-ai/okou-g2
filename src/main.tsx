@@ -1,26 +1,11 @@
-import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ClerkProvider } from '@clerk/clerk-react'
-
 import App from './App'
+import { DeviceAuth } from './auth'
 import './styles.css'
 
-const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
-
-const root = createRoot(document.getElementById('root')!)
-
-if (!publishableKey) {
-  root.render(
-    <div className="fatal">
-      Missing <code>VITE_CLERK_PUBLISHABLE_KEY</code> at build time.
-    </div>,
-  )
-} else {
-  root.render(
-    <StrictMode>
-      <ClerkProvider publishableKey={publishableKey} afterSignOutUrl="/">
-        <App />
-      </ClerkProvider>
-    </StrictMode>,
-  )
-}
+const auth = new DeviceAuth()
+window.addEventListener('storage', (event) => {
+  if (event.key === 'okou-g2/signed-out') void auth.restore()
+})
+createRoot(document.getElementById('root')!).render(<App auth={auth} />)
+void auth.restore()

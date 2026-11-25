@@ -20,10 +20,6 @@
     "run_worker_first": ["/api/*"]
   },
   "vars": {
-    // Clerk production instance for okou.ai. Session tokens are verified against
-    // this issuer's public JWKS, so the Worker holds no Clerk secret.
-    "CLERK_ISSUER": "https://clerk.okou.ai",
-    // Accepted `azp` (authorized party) values on the Clerk session token.
-    "ALLOWED_ORIGINS": "https://g2.okou.ai,http://localhost:5173"
+    "OAUTH_CLIENT_ID": ""
   }
 }
