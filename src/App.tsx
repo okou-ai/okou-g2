@@ -97,6 +97,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
       <button className="link" onClick={() => void auth.signOut()}>Cancel</button>
     </section>}
     {login.phase === 'ready' && <>
+      {login.session.temporary && <p className="error" role="status">Signed in for this launch only. Even App could not save your session.</p>}
       <section className="card">
         <h2>Even G2 conversation</h2>
         {chat.thread && <p className="mono">{chat.thread}</p>}
