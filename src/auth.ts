@@ -1,3 +1,4 @@
+import { MCP_GRANT_PROMPT } from './device-protocol'
 import type { DeviceCode, DeviceSession } from './types'
 import { AuthError, InstalledGrant } from './installed-grant'
 import { exclusive } from './install-storage'
@@ -51,6 +52,7 @@ export class DeviceAuth {
     clearTimeout(this.timer)
     this.set({ phase: 'loading' })
     try {
+      let consentError: string | undefined
       let signedOut = false
       try { signedOut = !!localStorage.getItem(SIGNED_OUT) } catch { /* Even's install store is independent. */ }
       if (!signedOut || await this.grants.hasInstalledSession()) {
@@ -61,6 +63,7 @@ export class DeviceAuth {
           return
         } catch (error) {
           if (!(error instanceof AuthError && error.status === 401)) throw error
+          if (error.code === 'mcp_grant_required') consentError = MCP_GRANT_PROMPT
         }
       }
       if (this.revision !== revision) return
@@ -73,7 +76,7 @@ export class DeviceAuth {
         }
         sessionStorage.removeItem(CHALLENGE)
       }
-      this.set({ phase: 'signed-out' })
+      this.set({ phase: 'signed-out', error: consentError })
     } catch {
       if (revision === this.revision) this.set({ phase: 'signed-out', error: 'Could not restore sign-in. Check your connection and try again.' })
     }
@@ -122,6 +125,7 @@ export class DeviceAuth {
         }
         if (code === 'access_denied') message = 'Authorization was declined.'
         else if (code === 'invalid_grant') message = 'This device code is no longer valid. Start a new sign-in in the Even App.'
+        else if (code === 'mcp_grant_required') message = MCP_GRANT_PROMPT
         else if (code === 'workspace_grant_required') message = 'Authorize again and choose an Okou workspace.'
         else if (code !== 'expired_token') message = 'Could not finish device sign-in. Start again.'
       }
@@ -154,7 +158,7 @@ export class DeviceAuth {
       next = await this.refreshing
     } catch (error) {
       if (revision === this.revision && error instanceof AuthError && error.status === 401) {
-        this.set({ phase: 'signed-out', error: 'Your session expired. Sign in again.' })
+        this.set({ phase: 'signed-out', error: error.code === 'mcp_grant_required' ? MCP_GRANT_PROMPT : 'Your session expired. Sign in again.' })
       }
       throw error
     }

@@ -2,11 +2,11 @@ import 'fake-indexeddb/auto'
 import { clear, createStore, get } from 'idb-keyval'
 import { UnsecuredJWT } from 'jose'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { DEVICE_CLIENT_ID, DEVICE_SCOPE, OAUTH_ISSUER } from '../config'
+import { CHAT_SCOPES, DEVICE_CLIENT_ID, DEVICE_SCOPE, MCP_URL, OAUTH_ISSUER } from '../config'
 import { InstalledGrant } from '../installed-grant'
 
 const store = createStore('okou-g2-auth', 'grants')
-const access = new UnsecuredJWT({ sub: 'user_fixture', org_id: 'org_fixture', client_id: DEVICE_CLIENT_ID })
+const access = new UnsecuredJWT({ sub: 'user_fixture', org_id: 'org_fixture', client_id: DEVICE_CLIENT_ID, aud: MCP_URL, scope: DEVICE_SCOPE })
   .setExpirationTime('1h').encode()
 const grant = (refresh_token?: string) => Response.json({ access_token: access, token_type: 'Bearer', refresh_token })
 beforeEach(() => clear(store))
@@ -27,7 +27,21 @@ it('starts at the issuer from a static package and distinguishes pending approva
     expect(typeof init.body).toBe('string')
     expect(new Headers(init.headers).get('content-type')).toBe('application/x-www-form-urlencoded')
   }
-  expect(Object.fromEntries(new URLSearchParams(String(fetch.mock.calls[0][1].body)))).toEqual({ client_id: DEVICE_CLIENT_ID, scope: DEVICE_SCOPE })
+  expect(Object.fromEntries(new URLSearchParams(String(fetch.mock.calls[0][1].body)))).toEqual({ client_id: DEVICE_CLIENT_ID, scope: DEVICE_SCOPE, resource: MCP_URL })
+})
+
+it('restores chat with an existing MCP grant and requests consent if its audience is incompatible', async () => {
+  const response = (aud: string) => {
+    const jwt = new UnsecuredJWT({ aud, sub: 'user_fixture', org_id: 'org_fixture',
+      client_id: DEVICE_CLIENT_ID, scp: CHAT_SCOPES }).setExpirationTime('1h').encode()
+    return Response.json({ access_token: jwt, token_type: 'Bearer', refresh_token: 'rotating-fixture' })
+  }
+  const fetch = vi.fn().mockResolvedValueOnce(grant('first-fixture'))
+    .mockResolvedValueOnce(response(MCP_URL)).mockResolvedValueOnce(response('https://other.example'))
+  vi.stubGlobal('fetch', fetch)
+  await new InstalledGrant().token('fixture')
+  expect(await new InstalledGrant().refresh()).toMatchObject({ userId: 'user_fixture' })
+  await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'mcp_grant_required', status: 401 })
 })
 
 it('restores a sealed rotating grant after a reload and revokes the latest credential on sign-out', async () => {
@@ -46,9 +60,11 @@ it('restores a sealed rotating grant after a reload and revokes the latest crede
   await reopened.logout()
   await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'signed_out' })
   const forms = fetch.mock.calls.map(([, init]) => Object.fromEntries(new URLSearchParams(String(init.body))))
-  expect(forms[1]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'first-fixture' })
+  expect(forms[0]).toMatchObject({ resource: MCP_URL })
+  expect(forms[1]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'first-fixture', resource: MCP_URL })
   expect(forms[2]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'next-fixture' })
   expect(forms[3]).toMatchObject({ token: 'next-fixture', token_type_hint: 'refresh_token' })
+  expect(forms[3]).not.toHaveProperty('resource')
   expect(fetch.mock.calls[3][0]).toBe(OAUTH_ISSUER + '/oauth/token/revoke')
   expect(await get(DEVICE_CLIENT_ID, store)).toBeUndefined()
 })

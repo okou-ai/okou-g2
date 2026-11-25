@@ -191,7 +191,8 @@ export class LensController {
       case 'cancel': {
         const { thread, task } = this.view
         if (thread && task && task.kind === menu.task?.kind && task.id === menu.task.id) {
-          void this.cancelTask(thread, task).catch(() => this.onError('Could not cancel the task'))
+          void this.cancelTask(thread, task).catch((error: unknown) =>
+            this.onError(error instanceof Error ? error.message : 'Could not cancel the task'))
         }
         break
       }

@@ -7,7 +7,13 @@ export interface History {
 }
 
 type Snapshot = ChatEventCursor & { url: string }
-type Tail = { rows: ChatEventRow[]; cursor: ChatEventCursor; hasMore: boolean }
+type McpRow = Omit<ChatEventRow, 'id' | 'chatThreadId'> & { eventId: string; threadId: string }
+type Page = { snapshot: Snapshot | null; rows: McpRow[]; cursor: ChatEventCursor; hasMore: boolean }
+
+function messages(client: OkouApiClient, threadId: string, cursor?: ChatEventCursor) {
+  return client.call<Page>('get_chat_messages', { threadId, limit: 50,
+    sinceSeqId: cursor?.lastSeqId, sinceEventId: cursor?.lastEventId ?? undefined })
+}
 const START: ChatEventCursor = { lastSeqId: 0, lastEventId: null }
 const KEEP = new Set(['input.prompt', 'input.automation', 'input.rejected', 'input.budget', 'input.goal',
   'output.message', 'output.error', 'control.interrupt', 'run.queued', 'run.dequeued', 'run.completed', 'run.failed', 'run.cancelled'])
@@ -35,7 +41,6 @@ async function readArchive(response: Response, consume: (row: ChatEventRow) => v
 export async function readHistory(
   client: OkouApiClient, thread: string, previous: History | null, pendingId?: string,
 ): Promise<History & { acknowledged: boolean }> {
-  const base = '/api/chat-threads/' + thread
   const matches = (r: ChatEventRow) => !!pendingId && r.eventType === 'input.prompt' &&
     (r.id === pendingId || r.revokesEventId === pendingId)
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -60,43 +65,37 @@ export async function readHistory(
     }
 
     try {
-      if (!cached) {
-        let snapshot: Snapshot | undefined
-        try {
-          snapshot = await client.request<Snapshot>(base + '/event-snapshot')
-        } catch (error) {
-          if (!(error instanceof ApiError && error.status === 404 && error.code === 'CHAT_EVENT_SNAPSHOT_NOT_FOUND')) throw error
-        }
-        if (snapshot) {
-          const url = new URL(snapshot.url)
-          if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Invalid chat archive URL')
-          const archive = await fetch(url, { credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: client.signal }).catch(() => {
-            client.signal.throwIfAborted()
-            return null
-          })
-          // An expired signed URL or unavailable storage origin can recover
-          // from the authoritative row API, starting at zero.
-          if (archive?.ok) {
-            await readArchive(archive, append)
-            verify(snapshot)
-          }
+      let tail = await messages(client, thread, cached?.cursor)
+      const snapshot = tail.snapshot
+      if (!cached && snapshot) {
+        const url = new URL(snapshot.url)
+        if (url.protocol !== 'https:' || url.username || url.password) throw new Error('Invalid chat archive URL')
+        const archive = await fetch(url, { credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: client.signal }).catch(() => {
+          client.signal.throwIfAborted()
+          return null
+        })
+        if (archive?.ok) {
+          await readArchive(archive, append)
+          verify(snapshot)
+        } else {
+          // The implicit first page starts after the snapshot. Re-request from zero
+          // when the signed archive can't be read instead of skipping its history.
+          tail = await messages(client, thread, START)
         }
       }
       for (;;) {
-        const query = new URLSearchParams({ sinceSeqId: String(cursor.lastSeqId), limit: '50' })
-        if (cursor.lastEventId) query.set('sinceEventId', cursor.lastEventId)
-        const tail = await client.request<Tail>(base + '/event-rows?' + query)
         if (!Array.isArray(tail.rows) || typeof tail.hasMore !== 'boolean' ||
             (tail.hasMore && !tail.rows.length)) throw new Error('Invalid chat history page')
-        for (const row of tail.rows) append(row)
+        for (const { eventId, threadId, ...row } of tail.rows) append({ ...row, id: eventId, chatThreadId: threadId })
         verify(tail.cursor)
         if (!tail.hasMore) return {
           rows: cached && cursor.lastEventId === cached.cursor.lastEventId ? cached.rows : rows,
           cursor, acknowledged,
         }
+        tail = await messages(client, thread, cursor)
       }
     } catch (error) {
-      if (!(attempt === 0 && error instanceof ApiError && error.status === 410)) throw error
+      if (!(attempt === 0 && error instanceof ApiError && error.status === null && error.code === 'CHAT_EVENTS_EXPIRED')) throw error
     }
   }
   throw new Error('Chat history cursor expired')

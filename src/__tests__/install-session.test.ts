@@ -3,15 +3,16 @@ import { clear, createStore, get } from 'idb-keyval'
 import { UnsecuredJWT } from 'jose'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { OkouApiClient } from '../api/client'
-import { DEVICE_CLIENT_ID } from '../config'
+import { DEVICE_CLIENT_ID, DEVICE_SCOPE, MCP_URL } from '../config'
 import { InstalledGrant } from '../installed-grant'
+import { rpc, toolResult } from './mcp-fixture'
 import type { InstallStorage } from '../install-storage'
 import { DeviceStore } from '../store'
 
 const authDatabase = createStore('okou-g2-auth', 'grants')
 const threadDatabase = createStore('okou-g2-device', 'chat')
 const owner = { userId: 'user_fixture', orgId: 'org_fixture' }
-const access = new UnsecuredJWT({ sub: owner.userId, org_id: owner.orgId, client_id: DEVICE_CLIENT_ID })
+const access = new UnsecuredJWT({ sub: owner.userId, org_id: owner.orgId, client_id: DEVICE_CLIENT_ID, aud: MCP_URL, scope: DEVICE_SCOPE })
   .setExpirationTime('1h').encode()
 const grant = (refresh_token: string) => Response.json({ access_token: access, token_type: 'Bearer', refresh_token })
 const api = new OkouApiClient(async () => access, new AbortController().signal)
@@ -73,12 +74,12 @@ it('carries an accessible 0.4.3 grant and thread into the package before the old
   const create = vi.fn()
   vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
     if (url.endsWith('/oauth/token')) return grant('fixture-latest')
-    if (init.method === 'POST') {
-      const { clientThreadId } = JSON.parse(String(init.body))
-      create(clientThreadId)
-      return Response.json({ id: clientThreadId })
-    }
-    return Response.json({ id: url.split('/').at(-2), computerUseHostId: null, cloudBrowserEnabled: false })
+    expect(url).toBe(MCP_URL)
+    const message = rpc(init)
+    expect(message.params.name).toBe('create_chat_thread')
+    const threadId = message.params.arguments.clientThreadId
+    create(threadId)
+    return toolResult(init, { threadId })
   })
   await new InstalledGrant(browser).token('fixture-device')
   const legacy = await new DeviceStore(owner, browser).fixedThread(api)

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SignJWT, UnsecuredJWT } from 'jose'
 import worker, { type Env } from '../../worker'
-import { DEVICE_SCOPE } from '../config'
+import { DEVICE_SCOPE, MCP_URL } from '../config'
+import { rpc, toolResult } from './mcp-fixture'
 const env: Env = { OAUTH_CLIENT_ID: 'fixture' }
 const origin = 'https://g2.okou.ai'
 const fileId = crypto.randomUUID()
@@ -27,11 +28,11 @@ describe('device OAuth endpoints', () => {
     vi.stubGlobal('fetch', post)
     expect((await request('auth/device')).status).toBe(200)
     expect(post.mock.calls[0][0]).toBe('https://clerk.okou.ai/oauth/device_authorization')
-    expect(Object.fromEntries(post.mock.calls[0][1].body as URLSearchParams)).toEqual({ client_id: 'fixture', scope: DEVICE_SCOPE })
+    expect(Object.fromEntries(post.mock.calls[0][1].body as URLSearchParams)).toEqual({ client_id: 'fixture', scope: DEVICE_SCOPE, resource: MCP_URL })
   })
 
   it('keeps refresh credentials in an HttpOnly cookie, rotates them and clears them on logout', async () => {
-    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture' })
+    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture', aud: MCP_URL, scope: DEVICE_SCOPE })
       .setExpirationTime('1h').encode()
     const post = vi.fn(async (_url: string, _init: RequestInit) => response({}))
     post.mockResolvedValueOnce(response({ access_token: token, token_type: 'Bearer', refresh_token: 'test-only-first' }))
@@ -52,7 +53,7 @@ describe('device OAuth endpoints', () => {
   })
 
   it('resumes a redeemed code from its own cookie without spending the code twice', async () => {
-    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture' })
+    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture', aud: MCP_URL, scope: DEVICE_SCOPE })
       .setExpirationTime('1h').encode()
     const grant = { access_token: token, token_type: 'Bearer' }
     let redeemed = false
@@ -78,14 +79,14 @@ describe('device OAuth endpoints', () => {
     expect(await other.json()).toEqual({ error: 'authorization_pending' })
     const grants = post.mock.calls.map(([, init]) => Object.fromEntries(init.body as URLSearchParams))
     expect(grants).toEqual([
-      { client_id: 'fixture', grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'original-device-code' },
-      { client_id: 'fixture', grant_type: 'refresh_token', refresh_token: 'first-refresh' },
-      { client_id: 'fixture', grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'another-code' },
+      { client_id: 'fixture', resource: MCP_URL, grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'original-device-code' },
+      { client_id: 'fixture', resource: MCP_URL, grant_type: 'refresh_token', refresh_token: 'first-refresh' },
+      { client_id: 'fixture', resource: MCP_URL, grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'another-code' },
     ])
   })
 
   it('refreshes existing untagged cookies as the original opaque token', async () => {
-    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture' })
+    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture', aud: MCP_URL, scope: DEVICE_SCOPE })
       .setExpirationTime('1h').encode()
     const post = vi.fn(async (_url: string, _init: RequestInit) => response({ access_token: token, token_type: 'Bearer' }))
     vi.stubGlobal('fetch', post)
@@ -116,23 +117,32 @@ describe('device OAuth endpoints', () => {
 describe('private WAV upload', () => {
   const headers = { 'content-type': 'audio/wav', 'content-length': '48', authorization: 'Bearer fixture' }
   it('uses the bearer only at Okou and completes the exact prepared upload', async () => {
-    const post = vi.fn(async (_url: string, _init: RequestInit) => response({}))
-    post.mockResolvedValueOnce(response({ id: fileId, uploadUrl: storage, uploadHeaders: { 'x-amz-meta-test': 'fixture' } }))
-      .mockResolvedValueOnce(new Response(null, { status: 200 })).mockResolvedValueOnce(response({ id: fileId }))
+    const post = vi.fn(async (url: string, init: RequestInit) => {
+      if (url === storage) return new Response(null, { status: 200 })
+      expect(url).toBe(MCP_URL)
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer fixture')
+      const { name, arguments: args } = rpc(init).params
+      if (name === 'prepare_voice_upload') {
+        expect(args).toEqual({ filename: 'recording.wav', size: 48 })
+        return toolResult(init, { id: fileId, uploadUrl: storage, uploadHeaders: { 'x-amz-meta-artifact-id': fileId } })
+      }
+      expect(name).toBe('complete_voice_upload')
+      expect(args).toEqual({ id: fileId })
+      return toolResult(init, { id: fileId })
+    })
     vi.stubGlobal('fetch', post)
     const bytes = new Uint8Array(48)
     expect(await (await request('voice', bytes, headers)).json()).toEqual({ id: fileId })
-    expect(post.mock.calls.map(([url]) => url)).toEqual(['https://api.okou.ai/api/uploads/prepare/private', storage, 'https://api.okou.ai/api/uploads/complete'])
+    expect(post.mock.calls.map(([url]) => url)).toEqual([MCP_URL, storage, MCP_URL])
     const put = post.mock.calls[1][1]
     expect(put.method).toBe('PUT')
-    expect(put.redirect).toBe('manual')
+    expect(put.redirect).toBe('error')
     expect(new Headers(put.headers).get('authorization')).toBeNull()
-    expect(new Headers(put.headers).get('x-amz-meta-test')).toBe('fixture')
-    expect(new Uint8Array(put.body as ArrayBuffer)).toEqual(bytes)
-    expect(JSON.parse(String(post.mock.calls[2][1].body))).toEqual({ id: fileId })
+    expect(new Headers(put.headers).get('x-amz-meta-artifact-id')).toBe(fileId)
+    expect(new Uint8Array(await (put.body as Blob).arrayBuffer())).toEqual(bytes)
   })
   it('stops before uploading audio to an unexpected destination', async () => {
-    const post = vi.fn(async () => response({ id: fileId, uploadUrl: 'https://elsewhere.example/clip' }))
+    const post = vi.fn(async (_url: string, init: RequestInit) => toolResult(init, { id: fileId, uploadUrl: 'https://elsewhere.example/clip' }))
     vi.stubGlobal('fetch', post)
     expect((await request('voice', new Uint8Array(48), headers)).status).toBe(502)
     expect(post).toHaveBeenCalledTimes(1)
