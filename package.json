@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "description": "A voice-in, text-out Okou client for Even G2 glasses",
   "scripts": {
-    "dev": "npm run build && wrangler dev --port 5173",
+    "dev": "npm run build && wrangler dev --assets ./dist --port 5173",
     "build": "vite build",
-    "preview": "wrangler dev",
+    "preview": "wrangler dev --assets ./dist",
     "typecheck": "tsc --noEmit",
-    "deploy": "npm run build && wrangler deploy",
+    "deploy": "wrangler deploy",
     "test": "vitest run"
   },
   "keywords": [],

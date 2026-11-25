@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SignJWT, UnsecuredJWT } from 'jose'
 import worker, { type Env } from '../../worker'
 import { DEVICE_SCOPE } from '../config'
-const env = { OAUTH_CLIENT_ID: 'fixture' } as Env
+const env: Env = { OAUTH_CLIENT_ID: 'fixture' }
 const origin = 'https://g2.okou.ai'
 const fileId = crypto.randomUUID()
 const storage = 'https://user-artifact-private-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com/clip?signature=fixture'
@@ -12,6 +12,12 @@ function request(path: string, body: BodyInit = '{}', headers: Record<string, st
 }
 const response = (body: unknown, status = 200) => Response.json(body, { status })
 afterEach(() => vi.unstubAllGlobals())
+
+it.each(['/', '/index.html', '/assets/index-abc123.js'])('retires the hosted client at %s', async (path) => {
+  const retired = await worker.fetch(new Request(origin + path), env)
+  expect(retired.status).toBe(410)
+  expect(await retired.text()).toContain('Me → Beta tester → Okou → Install')
+})
 
 describe('device OAuth endpoints', () => {
   it('requests the device scopes with just the G2 public client ID', async () => {
