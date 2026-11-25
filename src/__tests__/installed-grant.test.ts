@@ -22,8 +22,12 @@ it('starts at the issuer from a static package and distinguishes pending approva
   expect(await client.device()).toMatchObject({ interval: 5, user_code: 'TEST' })
   await expect(client.token('fixture')).rejects.toMatchObject({ code: 'authorization_pending' })
   expect(fetch.mock.calls.map(([url]) => url)).toEqual([OAUTH_ISSUER + '/oauth/device_authorization', OAUTH_ISSUER + '/oauth/token'])
-  for (const [, init] of fetch.mock.calls) expect(init).toMatchObject({ credentials: 'omit', redirect: 'error', method: 'POST' })
-  expect(Object.fromEntries(fetch.mock.calls[0][1].body as URLSearchParams)).toEqual({ client_id: DEVICE_CLIENT_ID, scope: DEVICE_SCOPE })
+  for (const [, init] of fetch.mock.calls) {
+    expect(init).toMatchObject({ credentials: 'omit', redirect: 'error', method: 'POST' })
+    expect(typeof init.body).toBe('string')
+    expect(new Headers(init.headers).get('content-type')).toBe('application/x-www-form-urlencoded')
+  }
+  expect(Object.fromEntries(new URLSearchParams(String(fetch.mock.calls[0][1].body)))).toEqual({ client_id: DEVICE_CLIENT_ID, scope: DEVICE_SCOPE })
 })
 
 it('restores a sealed rotating grant after a reload and revokes the latest credential on sign-out', async () => {
@@ -41,7 +45,7 @@ it('restores a sealed rotating grant after a reload and revokes the latest crede
   await reopened.token('fixture')
   await reopened.logout()
   await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'signed_out' })
-  const forms = fetch.mock.calls.map(([, init]) => Object.fromEntries(init.body as URLSearchParams))
+  const forms = fetch.mock.calls.map(([, init]) => Object.fromEntries(new URLSearchParams(String(init.body))))
   expect(forms[1]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'first-fixture' })
   expect(forms[2]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'next-fixture' })
   expect(forms[3]).toMatchObject({ token: 'next-fixture', token_type_hint: 'refresh_token' })

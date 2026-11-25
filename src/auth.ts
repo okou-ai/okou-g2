@@ -1,5 +1,6 @@
 import type { DeviceCode, DeviceSession } from './types'
 import { AuthError, InstalledGrant } from './installed-grant'
+import { version } from '../app.json'
 
 interface Challenge extends DeviceCode {
   expiresAt: number
@@ -14,6 +15,16 @@ export type LoginState =
 
 const CHALLENGE = 'okou-g2/device-code'
 const SIGNED_OUT = 'okou-g2/signed-out'
+
+function deviceStartError(error: unknown) {
+  const origin = typeof location === 'undefined' ? '' : ' · ' + location.origin
+  const build = 'G2 ' + version + origin
+  if (!(error instanceof AuthError)) return 'Could not reach clerk.okou.ai. ' + build
+  if (error.code === 'invalid_device_response') return 'Unreadable device code from Clerk (HTTP ' + error.status + '). ' + build
+  const publicCodes = ['invalid_request', 'invalid_client', 'invalid_scope', 'unauthorized_client', 'access_denied', 'temporarily_unavailable', 'server_error', 'slow_down']
+  const reason = publicCodes.includes(error.code) ? ', ' + error.code : ''
+  return 'Device sign-in failed (HTTP ' + error.status + reason + '). ' + build
+}
 
 // Serialize token rotation across tabs, or inside a single older WebView.
 let localGrants = Promise.resolve()
@@ -84,10 +95,7 @@ export class DeviceAuth {
       this.wait({ ...code, expiresAt: Date.now() + code.expires_in * 1000, nextPollAt: Date.now() + code.interval * 1000 }, revision)
     } catch (error) {
       if (this.revision !== revision) return
-      const message = error instanceof TypeError && typeof location !== 'undefined'
-        ? 'Could not reach clerk.okou.ai from ' + location.origin + '.'
-        : 'Could not start device sign-in. Try again.'
-      this.set({ phase: 'signed-out', error: message })
+      this.set({ phase: 'signed-out', error: deviceStartError(error) })
     }
   }
 
