@@ -48,6 +48,17 @@ it('restores the pending code on return to the WebView and stops polling after d
   expect(fetch).toHaveBeenCalledTimes(2)
 })
 
+it('keeps an issued session if the WebView cannot clear its pending code', async () => {
+  const fetch = vi.fn().mockResolvedValueOnce(Response.json(code)).mockResolvedValueOnce(Response.json(session()))
+  vi.stubGlobal('fetch', fetch)
+  const auth = new DeviceAuth()
+  await auth.begin()
+  vi.spyOn(sessionStorage, 'removeItem').mockImplementation(() => { throw new Error('Storage unavailable') })
+  await vi.advanceTimersByTimeAsync(90_000)
+  expect(auth.snapshot()).toMatchObject({ phase: 'ready', session: { orgId: 'org_test' } })
+  expect(fetch).toHaveBeenCalledTimes(2)
+})
+
 it('shares a rotating refresh across API and realtime callers and rejects an old workspace', async () => {
   const fetch = vi.fn().mockResolvedValueOnce(Response.json({ ...session(), expiresAt: Date.now() + 500 }))
     .mockResolvedValueOnce(Response.json({ ...session(), accessToken: 'renewed' }))

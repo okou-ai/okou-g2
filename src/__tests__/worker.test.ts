@@ -45,6 +45,51 @@ describe('device OAuth endpoints', () => {
     expect((post.mock.calls[2][1].body as URLSearchParams).get('token')).toBe('test-only-next')
   })
 
+  it('resumes a redeemed code from its own cookie without spending the code twice', async () => {
+    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture' })
+      .setExpirationTime('1h').encode()
+    const grant = { access_token: token, token_type: 'Bearer' }
+    let redeemed = false
+    const post = vi.fn(async (_url: string, init: RequestInit) => {
+      const form = init.body as URLSearchParams
+      if (form.get('refresh_token') === 'first-refresh') return response(grant)
+      if (form.get('device_code') === 'another-code') return response({ error: 'authorization_pending' }, 400)
+      if (redeemed) return response({ error: 'invalid_grant' }, 400)
+      redeemed = true
+      return response({ ...grant, refresh_token: 'first-refresh' })
+    })
+    vi.stubGlobal('fetch', post)
+    const code = JSON.stringify({ device_code: 'original-device-code' })
+    const issued = await request('auth/token', code)
+    const cookie = issued.headers.get('set-cookie')!.split(';')[0]
+    // A WebView can have received Set-Cookie without seeing the response body.
+    const resumed = await request('auth/token', code, { cookie })
+    expect(resumed.status).toBe(200)
+    expect(await resumed.json()).toMatchObject({ userId: 'user_a', orgId: 'org_a' })
+    expect(cookie).not.toContain('original-device-code')
+    const renewedCookie = resumed.headers.get('set-cookie')!.split(';')[0]
+    const other = await request('auth/token', JSON.stringify({ device_code: 'another-code' }), { cookie: renewedCookie })
+    expect(await other.json()).toEqual({ error: 'authorization_pending' })
+    const grants = post.mock.calls.map(([, init]) => Object.fromEntries(init.body as URLSearchParams))
+    expect(grants).toEqual([
+      { client_id: 'fixture', grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'original-device-code' },
+      { client_id: 'fixture', grant_type: 'refresh_token', refresh_token: 'first-refresh' },
+      { client_id: 'fixture', grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'another-code' },
+    ])
+  })
+
+  it('refreshes existing untagged cookies as the original opaque token', async () => {
+    const token = new UnsecuredJWT({ sub: 'user_a', org_id: 'org_a', client_id: 'fixture' })
+      .setExpirationTime('1h').encode()
+    const post = vi.fn(async (_url: string, _init: RequestInit) => response({ access_token: token, token_type: 'Bearer' }))
+    vi.stubGlobal('fetch', post)
+    const cookie = '__Host-g2-refresh-fixture=legacy%2Btoken'
+    const restored = await request('auth/refresh', '{}', { cookie })
+    expect(restored.status).toBe(200)
+    expect((post.mock.calls[0][1].body as URLSearchParams).get('refresh_token')).toBe('legacy+token')
+    expect(restored.headers.get('set-cookie')).toContain(cookie + ';')
+  })
+
   it('rejects a grant that does not supply a workspace or names a different client', async () => {
     for (const fields of [{ client_id: 'fixture' }, { org_id: 'org_a', client_id: 'another-client' }]) {
       const token = await new SignJWT({ sub: 'user_a', ...fields }).setProtectedHeader({ alg: 'HS256' })

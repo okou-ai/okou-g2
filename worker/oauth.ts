@@ -18,6 +18,11 @@ function clerk(path: string, params: Record<string, string>) {
   })
 }
 
+async function deviceCodeHash(code: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(code))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 function parseSession(body: Record<string, unknown>, clientId: string): DeviceSession {
   if (typeof body.access_token !== 'string' || String(body.token_type).toLowerCase() !== 'bearer') {
     throw new Error('Invalid access token')
@@ -40,7 +45,11 @@ export async function auth(request: Request, action: string, clientId: string): 
     '; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=' + (token ? 60 * 60 * 24 * 90 : 0)
   const saved = (request.headers.get('cookie') ?? '').split(';').map((v) => v.trim())
     .find((v) => v.startsWith(name + '='))
-  const refresh = saved ? decodeURIComponent(saved.slice(name.length + 1)) : ''
+  const stored = saved ? decodeURIComponent(saved.slice(name.length + 1)) : ''
+  // Previously issued cookies hold the opaque refresh token on its own.
+  const receipt = /^g2v1:([0-9a-f]{64}):(.+)$/u.exec(stored)
+  const refresh = receipt?.[2] ?? stored
+  let grantHash = receipt?.[1]
 
   if (action === 'logout') {
     // Local sign-out also succeeds if the issuer is temporarily unavailable.
@@ -70,16 +79,22 @@ export async function auth(request: Request, action: string, clientId: string): 
     if (typeof input?.device_code !== 'string' || !input.device_code || input.device_code.length > 4096) {
       return json({ error: 'invalid_device_code' }, 400)
     }
-    params = { grant_type: DEVICE_GRANT, device_code: input.device_code }
+    grantHash = await deviceCodeHash(input.device_code)
+    // A resumed WebView may have the cookie even when it lost the success
+    // response. Redeeming that one-time code again can revoke the issued grant.
+    params = grantHash === receipt?.[1]
+      ? { grant_type: 'refresh_token', refresh_token: refresh }
+      : { grant_type: DEVICE_GRANT, device_code: input.device_code }
   } else return json({ error: 'not_found' }, 404)
 
   const result = await clerk('/oauth/token', { ...params, client_id: clientId })
   const body = await result.json() as Record<string, unknown>
+  const refreshing = params.grant_type === 'refresh_token'
   if (!result.ok) {
     const known = ['authorization_pending', 'slow_down', 'access_denied', 'expired_token', 'invalid_grant']
     const code = typeof body.error === 'string' && known.includes(body.error) ? body.error : 'token_request_failed'
-    if (action === 'refresh' && ['invalid_grant', 'access_denied', 'expired_token'].includes(code)) {
-      return json({ error: 'signed_out' }, 401, cookie(''))
+    if (refreshing && ['invalid_grant', 'access_denied', 'expired_token'].includes(code)) {
+      return json({ error: action === 'refresh' ? 'signed_out' : 'invalid_grant' }, 401, cookie(''))
     }
     return json({ error: code }, result.status >= 500 ? 502 : 400)
   }
@@ -89,7 +104,7 @@ export async function auth(request: Request, action: string, clientId: string): 
   } catch {
     return json({ error: 'workspace_grant_required' }, 401, cookie(''))
   }
-  const next = body.refresh_token ?? (action === 'refresh' ? refresh : null)
+  const next = body.refresh_token ?? (refreshing ? refresh : null)
   if (typeof next !== 'string' || !next) return json({ error: 'offline_grant_required' }, 401, cookie(''))
-  return json(session, 200, cookie(next))
+  return json(session, 200, cookie(grantHash ? 'g2v1:' + grantHash + ':' + next : next))
 }

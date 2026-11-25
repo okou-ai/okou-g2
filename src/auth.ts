@@ -108,18 +108,18 @@ export class DeviceAuth {
   }
 
   private async poll(challenge: Challenge, revision: number) {
-    if (revision !== this.revision) return
+    if (revision !== this.revision || this.state.phase !== 'verify') return
     let message = 'This device code expired. Start sign-in again.'
     if (Date.now() < challenge.expiresAt) {
       try {
         const session = await grantLock(async () => {
-          if (revision !== this.revision) throw new Error('Cancelled')
+          if (revision !== this.revision || this.state.phase !== 'verify') throw new Error('Cancelled')
           return post<DeviceSession>('token', { device_code: challenge.device_code })
         })
         if (revision === this.revision) this.accept(session)
         return
       } catch (error) {
-        if (revision !== this.revision) return
+        if (revision !== this.revision || this.state.phase !== 'verify') return
         const code = error instanceof AuthError ? error.code : ''
         if (code === 'authorization_pending' || code === 'slow_down' ||
             !(error instanceof AuthError) || error.status >= 500) {
@@ -128,6 +128,7 @@ export class DeviceAuth {
           return
         }
         if (code === 'access_denied') message = 'Authorization was declined.'
+        else if (code === 'invalid_grant') message = 'This device code is no longer valid. Start a new sign-in in the Even App.'
         else if (code === 'workspace_grant_required') message = 'Authorize again and choose an Okou workspace.'
         else if (code !== 'expired_token') message = 'Could not finish device sign-in. Start again.'
       }
@@ -137,8 +138,13 @@ export class DeviceAuth {
   }
 
   private accept(session: DeviceSession) {
-    sessionStorage.removeItem(CHALLENGE)
-    localStorage.removeItem(SIGNED_OUT)
+    clearTimeout(this.timer)
+    try {
+      sessionStorage.removeItem(CHALLENGE)
+      localStorage.removeItem(SIGNED_OUT)
+    } catch {
+      // A WebView storage error must not turn an issued session into another token poll.
+    }
     this.set({ phase: 'ready', session })
   }
 
