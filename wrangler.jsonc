@@ -20,6 +20,6 @@
     "run_worker_first": ["/api/*"]
   },
   "vars": {
-    "OAUTH_CLIENT_ID": ""
+    "OAUTH_CLIENT_ID": "gglCdwYgeNKmJxdj"
   }
 }
