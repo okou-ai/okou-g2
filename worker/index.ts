@@ -2,14 +2,18 @@ import { auth, json } from './oauth'
 import { uploadVoice } from './voice'
 
 export interface Env {
-  ASSETS: Fetcher
   OAUTH_CLIENT_ID: string
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
-    if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request)
+    if (!url.pathname.startsWith('/api/')) {
+      return new Response('This QR link is retired. Open the Even Realities app and go to Me → Beta tester → Okou → Install.\n', {
+        status: 410,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+      })
+    }
     if (url.pathname === '/api/health') return json({ ok: true })
     if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405)
     if (request.headers.get('origin') !== url.origin) return json({ error: 'invalid_origin' }, 403)

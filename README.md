@@ -1,6 +1,12 @@
 # Okou for Even G2
 
-Speak to a dedicated Okou conversation from Even G2 glasses and read replies on the lens. Open the hosted app in the Even App WebView on a phone paired with G2. The phone runs the client and the glasses provide the microphone, touch controls and display.
+Speak to a dedicated Okou conversation from Even G2 glasses and read replies on the lens. The phone runs the client and the glasses provide the microphone, touch controls and display.
+
+## Install the Beta
+
+Use the Even Hub Beta package for all product validation on the glasses. Accept the tester invitation, then open **Me → Beta tester → Okou → Install** in the Even Realities app using the invited account. Open Okou from the glasses launcher. [Even Hub Beta testing](https://hub.evenrealities.com/docs/test/beta-testing)
+
+Version 0.4.1 can be installed, but sign-in stops at **Could not start device sign-in**. That build sends `/api/auth/device` to the package’s own origin. End-to-end validation requires a Beta that can sign in from the installed WebView.
 
 ## Sign in and use the glasses
 
@@ -32,15 +38,19 @@ npm test
 npm run dev
 ```
 
-The development command builds the SPA and serves it with the Worker at `http://localhost:5173`. Use an HTTPS deployment when loading from a phone. Both the SPA and its Worker routes must be served from the same origin. Okou API and signed history reads must allow that origin.
+The development command builds the frontend and serves it with the Worker at `http://localhost:5173` for local debugging.
 
-## Deployment
+## Release a Beta
 
-The Worker and Vite assets are deployed together on `g2.okou.ai`.
+For each new Beta, increment the version in `app.json`, build the client and pack it with the Even Hub CLI.
 
 ```sh
-npm run deploy
-npx @evenrealities/evenhub-cli qr --url https://g2.okou.ai
+npm run build
+npm exec --yes --package=@evenrealities/evenhub-cli@0.2.0 -- evenhub pack app.json dist -o okou.ehpk --sdk-ver 0.0.15
 ```
 
-Scan the URL QR from the Even App. This hosted flow keeps OAuth cookies and microphone uploads on the G2 origin.
+Upload `okou.ehpk` to the Okou project in Even Hub and publish that version to the Beta channel. Install the published version on the paired phone to verify sign-in, session restoration after reopening the Even app, and sending a recording and receiving the reply on the lens.
+
+## G2 Worker
+
+`npm run deploy` publishes the Worker on `g2.okou.ai`. Its `/api/` routes handle device auth and private audio uploads. The retired QR URL and client asset URLs return HTTP 410 with Beta installation instructions.
