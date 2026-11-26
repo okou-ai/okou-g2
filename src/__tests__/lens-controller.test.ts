@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
-  OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent,
+  ImageRawDataUpdateResult, OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent, type ImageRawDataUpdate,
   type CreateStartUpPageContainer, type RebuildPageContainer, type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import type { RecordedVoice } from '../lens/recording'
@@ -22,6 +22,7 @@ async function setup(open = async () => true, stop = async () => true, initial: 
   const bridge = {
     createStartUpPageContainer: vi.fn(async (_page: CreateStartUpPageContainer) => 0),
     rebuildPageContainer: vi.fn(async (page: RebuildPageContainer) => { displayed = page; return true }),
+    updateImageRawData: vi.fn(async (_image: ImageRawDataUpdate): Promise<ImageRawDataUpdateResult> => ImageRawDataUpdateResult.success),
     textContainerUpgrade: vi.fn(async (update: TextContainerUpgrade) => {
       const target = displayed.textObject!.find(box => box.containerID === update.containerID)!
       target.content = update.content?.trimEnd()
@@ -67,19 +68,22 @@ describe('glasses reader', () => {
     await vi.advanceTimersByTimeAsync(15_000)
     const answer = reply(2, 'This is the latest reply.')
     expect(g.page().textObject!.every(v => !v.content)).toBe(true)
+    expect(g.page().imageObject).toBeUndefined()
     await g.update({ reply: answer })
-    expect(g.page().textObject!.filter(v => v.content).map(v => v.containerName)).toEqual(['indicator'])
+    expect(g.box('title')).toMatchObject({ content: 'OKOU', xPosition: 27, yPosition: 0 })
+    expect(g.page().imageObject?.[0]).toMatchObject({ xPosition: 4, yPosition: 4, width: 20, height: 20 })
     g.bridge.rebuildPageContainer.mockResolvedValueOnce(false)
     await g.tap()
     expect(g.error).toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(15_000)
-    expect(g.box('indicator')?.content).toBeTruthy()
+    expect(g.box('title')?.content).toBe('OKOU')
     await g.tap()
     expect(g.box('body')?.content).toBe(answer.text)
     expect(g.box('title')?.content).toBe('OKOU')
     expect(g.box('voice-status')).toBeUndefined()
     await vi.advanceTimersByTimeAsync(15_000)
     expect(g.page().textObject!.every(v => !v.content)).toBe(true)
+    expect(g.page().imageObject).toBeUndefined()
   })
 
   it('counts inactivity from the last reader gesture and consumes every kind of wake gesture', async () => {
@@ -96,7 +100,8 @@ describe('glasses reader', () => {
       await g.tap(Gesture.LONG_PRESS_RELEASE_EVENT)
       expect(g.box('body')?.content).toBe(middle)
       await vi.advanceTimersByTimeAsync(1)
-      expect(g.page().textObject!.filter(box => box.content).map(box => box.containerName)).toEqual(['indicator'])
+      expect(g.page().textObject!.every(box => !box.content)).toBe(true)
+      expect(g.page().imageObject?.[0]).toMatchObject({ xPosition: 4, yPosition: 4, width: 28, height: 20 })
       await g.tap(gesture)
       expect(g.box('body')?.content).toBe(middle)
       expect(g.box('primary-hint')?.content).toBe('Tap to speak')
@@ -104,6 +109,63 @@ describe('glasses reader', () => {
     }
     expect(g.bridge.audioControl).not.toHaveBeenCalled()
     expect(g.bridge.shutDownPageContainer).not.toHaveBeenCalled()
+  })
+
+  it('hops three dots over two seconds, then holds unread ahead of running work until the reply is read', async () => {
+    const g = await setup(undefined, undefined, { task, working: true })
+    await vi.advanceTimersByTimeAsync(15_000)
+    const sends = g.bridge.updateImageRawData
+    const pixels = () => sends.mock.lastCall![0].imageData as Uint8Array
+    const tops = () => [3, 14, 25].map(x => {
+      for (let y = 0; y < 20; y++) if (pixels()[y * 28 + x] > 127) return y
+      return -1
+    })
+    const first = pixels()
+    const builds = g.bridge.rebuildPageContainer.mock.calls.length
+    expect(tops()).toEqual([8, 8, 8])
+    await vi.advanceTimersByTimeAsync(375)
+    expect(tops()[0]).toBe(2)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(tops()[1]).toBe(2)
+    await vi.advanceTimersByTimeAsync(125)
+    expect(tops()[2]).toBe(2)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(pixels().every(value => !value)).toBe(true)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(pixels()).toEqual(first)
+    expect(g.bridge.rebuildPageContainer).toHaveBeenCalledTimes(builds)
+
+    const unread = reply(7, 'The new answer')
+    await g.update({ task, working: true, reply: unread })
+    expect(g.box('title')?.content).toBe('OKOU')
+    const held = sends.mock.calls.length
+    await vi.advanceTimersByTimeAsync(4000)
+    await g.update({ task, working: true, reply: unread })
+    expect(sends).toHaveBeenCalledTimes(held)
+    await g.tap()
+    expect(g.box('body')?.content).toBe(unread.text)
+    await g.update({ task, reply: unread })
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(pixels()).toEqual(first)
+    g.controller.close()
+    const closed = sends.mock.calls.length
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(sends).toHaveBeenCalledTimes(closed)
+  })
+
+  it('keeps only one standby image in flight and discards missed poses when an unread reply arrives', async () => {
+    const g = await setup(undefined, undefined, { working: true })
+    let finish!: (result: ImageRawDataUpdateResult) => void
+    const sends = g.bridge.updateImageRawData
+    sends.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    await vi.advanceTimersByTimeAsync(16_000)
+    expect(sends).toHaveBeenCalledTimes(1)
+    await g.update({ working: true, reply: reply(1, 'Unread') })
+    finish(ImageRawDataUpdateResult.sendFailed)
+    await vi.advanceTimersByTimeAsync(2500)
+    expect(sends).toHaveBeenCalledTimes(2)
+    expect(g.box('title')?.content).toBe('OKOU')
+    expect(g.error).not.toHaveBeenCalled()
   })
 
   it('opens the system exit confirmation from the root and gives the reader a fresh interval after dismissal', async () => {
@@ -321,7 +383,7 @@ describe('glasses microphone', () => {
     expect(g.box('body')?.content).toBe('Arrived during recording')
     expect(g.bridge.audioControl).toHaveBeenLastCalledWith(false)
     await vi.advanceTimersByTimeAsync(15_000)
-    expect(g.box('indicator')?.content).toBe('')
+    expect(g.page().imageObject).toBeUndefined()
     expect(g.send).not.toHaveBeenCalled()
   })
 

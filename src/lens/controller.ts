@@ -1,9 +1,10 @@
-import { OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
+import { ImageRawDataUpdateResult, OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent, type ImageRawDataUpdate } from '@evenrealities/even_hub_sdk'
 import { getTextWidth } from '@evenrealities/pretext'
 import type { RecordedVoice } from './recording'
 import { startRecording, type Recorder } from './audio'
 import type { LensReply, TaskTarget } from './messages'
 import { indicatorUpdate, listeningLabel, statusUpdate, startupPage, lensPage, menuItems, paginate, type LensPage } from './screens'
+import { FRAME_MS, unreadDot, workingDots } from './standby'
 
 export interface LensView {
   thread: string | null
@@ -44,6 +45,9 @@ export class LensController {
   private active = true
   private closed = false
   private sleepTimer?: ReturnType<typeof setTimeout>
+  private frameTimer?: ReturnType<typeof setTimeout>
+  private waveStart?: number
+  private lastStandbyImage?: ImageRawDataUpdate
   private exitDialog = false
   private micCleanup: Promise<void> = Promise.resolve()
 
@@ -84,6 +88,7 @@ export class LensController {
 
   close() {
     this.closed = true
+    this.stopWave()
     if (typeof document !== 'undefined') document.documentElement?.removeEventListener('animationiteration', this.heartbeat)
     this.animateWork(false)
     this.unsubscribe?.()
@@ -109,6 +114,7 @@ export class LensController {
 
   private leaveDisplay() {
     this.active = false
+    this.stopWave()
     this.exitDialog = false
     this.pageIndex = 0
     this.animateWork(false)
@@ -288,7 +294,10 @@ export class LensController {
     const stage = this.screenStage
     const working = this.view.working || this.view.pending || stage === 'sending'
     const unread = (this.view.reply?.seqId ?? 0) > this.readSeq
-    const indicator = working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
+    let indicator: LensPage['indicator'] = 'off'
+    if (mode === 'quiet' && unread) indicator = 'unread'
+    else if (working || (mode === 'quiet' && this.view.task)) indicator = 'working'
+    else if (unread && (mode !== 'reader' || this.menu)) indicator = 'unread'
     const body = mode === 'quiet' ? '' : this.pages[this.pageIndex]
     const scrollHint = mode === 'quiet' || this.menu ? '' : [
       this.pageIndex > 0 ? '∧' : '', this.pageIndex + 1 < this.pages.length ? '∨' : '',
@@ -330,6 +339,37 @@ export class LensController {
     this.sleepTimer = undefined
   }
 
+  private stopWave() {
+    if (this.frameTimer !== undefined) clearTimeout(this.frameTimer)
+    this.frameTimer = undefined
+    this.waveStart = undefined
+  }
+
+  private async drawStandby(indicator: 'working' | 'unread', rebuilt: boolean) {
+    let image = unreadDot
+    if (indicator === 'working') {
+      const now = performance.now()
+      this.waveStart ??= now
+      image = workingDots(now - this.waveStart)
+    }
+    if (rebuilt || this.lastStandbyImage !== image) {
+      const result = await this.bridge.updateImageRawData(image)
+      if (result === ImageRawDataUpdateResult.success) this.lastStandbyImage = image
+      else if (indicator !== 'working' || result !== ImageRawDataUpdateResult.sendFailed) {
+        throw new Error('Could not update the G2 standby indicator')
+      }
+    }
+    // Schedule only after the bridge has accepted the frame. A slow transfer
+    // skips missed poses instead of replaying them after a wake or new reply.
+    if (this.waveStart !== undefined && this.frameTimer === undefined) {
+      const elapsed = performance.now() - this.waveStart
+      this.frameTimer = setTimeout(() => {
+        this.frameTimer = undefined
+        this.draw()
+      }, Math.ceil(FRAME_MS - elapsed % FRAME_MS))
+    }
+  }
+
   private syncSleepTimer() {
     if (this.closed || !this.active || !this.unsubscribe || this.screenStage !== 'reader' || this.menu || this.exitDialog) {
       this.clearSleepTimer()
@@ -348,21 +388,29 @@ export class LensController {
     this.renderQueue = this.renderQueue.then(async () => {
       if (this.closed || !this.active) return
       const page = this.page()
-      const key = JSON.stringify([page.menu, page.mode, page.body, getTextWidth(page.status), page.primaryHint, page.scrollHint, page.secondaryHint])
-      // PCM crosses one whole second per phase: bright for one second, dim
-      // for one second. No callbacks run just to animate an idle WebView.
+      const quiet = page.mode === 'quiet'
+      const key = JSON.stringify([page.menu, page.mode, quiet && page.indicator, page.body, getTextWidth(page.status), page.primaryHint, page.scrollHint, page.secondaryHint])
+      // The recording clock and brightness both advance with captured PCM.
       const recording = this.stage === 'recording' && !!this.recorder
-      this.animateWork(!recording && page.indicator === 'working')
+      if (!quiet || page.indicator !== 'working') this.stopWave()
+      this.animateWork(!quiet && !recording && page.indicator === 'working')
       const dim = recording ? this.recorder!.seconds % 2 === 1 : this.dim
       const level = page.status || page.indicator !== 'off' ? (dim ? 2 : 4) : 0
       const { thread, reply } = this.view
-      if (key !== this.lastPage) {
+      const rebuilt = key !== this.lastPage
+      if (rebuilt) {
         if (!await this.bridge.rebuildPageContainer(lensPage(page, level))) throw new Error('Could not update the G2 display')
         this.lastPage = key
-      } else if (page.status && (this.lastStatus !== page.status || level !== this.lastDotLevel)) {
-        if (!await this.bridge.textContainerUpgrade(statusUpdate(page.status, level))) throw new Error('Could not update the G2 recording status')
-      } else if (level !== this.lastDotLevel) {
-        if (!await this.bridge.textContainerUpgrade(indicatorUpdate(level))) throw new Error('Could not update the G2 indicator')
+      }
+      if (this.closed || !this.active) return
+      if (quiet) {
+        if (page.indicator !== 'off') await this.drawStandby(page.indicator, rebuilt)
+      } else if (!rebuilt) {
+        if (page.status && (this.lastStatus !== page.status || level !== this.lastDotLevel)) {
+          if (!await this.bridge.textContainerUpgrade(statusUpdate(page.status, level))) throw new Error('Could not update the G2 recording status')
+        } else if (level !== this.lastDotLevel) {
+          if (!await this.bridge.textContainerUpgrade(indicatorUpdate(level))) throw new Error('Could not update the G2 indicator')
+        }
       }
       this.lastStatus = page.status
       this.lastDotLevel = level

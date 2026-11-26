@@ -4,6 +4,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { getTextWidth, measureTextWrap } from '@evenrealities/pretext'
 import { BODY, LENS_HEIGHT, LENS_WIDTH, LINE_HEIGHT } from './display'
+import { standbyContainer } from './standby'
 
 export type LensMode = 'quiet' | 'reader' | 'voice'
 export type Indicator = 'off' | 'unread' | 'working'
@@ -59,7 +60,14 @@ export function statusUpdate(content: string, level: number) {
 function layout(page: LensPage, level: number) {
   const boxes: TextContainerProperty[] = []
   const footerY = LENS_HEIGHT - LINE_HEIGHT
-  if (page.mode !== 'quiet') boxes.push(text(2, 'title', 'OKOU', 0, 0, getTextWidth('OKOU'), LINE_HEIGHT))
+  if (page.mode === 'quiet') {
+    boxes.push(text(1, 'body', '', BODY.x, BODY.y, BODY.width, BODY.height))
+    if (page.indicator === 'off') return { containerTotalNum: 1, textObject: boxes }
+    const unread = page.indicator === 'unread'
+    if (unread) boxes.push(text(2, 'title', 'OKOU', 27, 0, getTextWidth('OKOU'), LINE_HEIGHT))
+    return { containerTotalNum: boxes.length + 1, textObject: boxes, imageObject: [standbyContainer(unread)] }
+  }
+  boxes.push(text(2, 'title', 'OKOU', 0, 0, getTextWidth('OKOU'), LINE_HEIGHT))
   if (page.status) {
     const width = getTextWidth(page.status)
     const status = text(VOICE.containerID, VOICE.containerName, page.status, LENS_WIDTH - width, 0, width, LINE_HEIGHT)
