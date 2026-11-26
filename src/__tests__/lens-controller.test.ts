@@ -42,8 +42,9 @@ async function setup(open = async () => true, stop = async () => true) {
     return 'sent' as const
   })
   const cancel = vi.fn(async () => {})
+  const refresh = vi.fn()
   const error = vi.fn()
-  const controller = new LensController(bridge as unknown as EvenAppBridge, send, vi.fn(), error, cancel)
+  const controller = new LensController(bridge as unknown as EvenAppBridge, send, refresh, error, cancel)
   onTestFinished(() => controller.close())
   controller.update(ready)
   await controller.start()
@@ -57,7 +58,7 @@ async function setup(open = async () => true, stop = async () => true) {
   const box = (name: string) => page().textObject?.find(v => v.containerName === name)
   const options = () => page().listObject?.[0]?.itemContainer?.itemName
   await settle()
-  return { emit, controller, bridge, send, sentWavs, cancel, error, update, tap, select, frame, page, box, options }
+  return { emit, controller, bridge, send, sentWavs, cancel, refresh, error, update, tap, select, frame, page, box, options }
 }
 
 describe('glasses reader', () => {
@@ -135,6 +136,19 @@ describe('glasses reader', () => {
     expect(g.send).not.toHaveBeenCalled()
     await g.tap()
     expect(g.box('voice-status')?.content).toBe('● Sending')
+    const checkSending = async () => {
+      expect(g.box('primary-hint')).toBeUndefined()
+      expect(g.box('secondary-hint')).toBeUndefined()
+      for (const action of [Gesture.CLICK_EVENT, Gesture.DOUBLE_CLICK_EVENT, Gesture.LONG_PRESS_EVENT]) {
+        await g.tap(action)
+        expect(g.box('voice-status')?.content).toBe('● Sending')
+        expect(g.options()).toBeUndefined()
+      }
+      expect(g.bridge.shutDownPageContainer).not.toHaveBeenCalled()
+      expect(g.send).toHaveBeenCalledTimes(1)
+      expect(g.refresh).not.toHaveBeenCalled()
+    }
+    await checkSending()
     expect(g.box('body')?.content).toMatch(/^Line 16/)
     await g.tap(Gesture.SCROLL_TOP_EVENT)
     expect(g.box('body')?.content).toBe(selected)
@@ -144,8 +158,13 @@ describe('glasses reader', () => {
     delivered()
     await vi.advanceTimersByTimeAsync(0)
     expect(g.box('body')?.content).toBe(selected)
+    await checkSending()
+    await g.tap(Gesture.SCROLL_TOP_EVENT)
+    expect(g.box('page-arrows')?.content).toBe('∨')
+    await g.tap(Gesture.SCROLL_BOTTOM_EVENT)
     await g.update({ reply: answer, working: true, task })
     expect(g.box('voice-status')?.content).toBe('● Working')
+    expect(g.box('primary-hint')?.content).toBe('Tap to speak')
     expect(g.box('body')?.content).toBe(selected)
     const finished = reply(3, 'Done.')
     await g.update({ reply: finished, working: true, task })
@@ -222,6 +241,20 @@ describe('glasses reader', () => {
 })
 
 describe('glasses microphone', () => {
+  it('completes a submitted recording when a second gesture arrives while the microphone is closing', async () => {
+    let closed!: () => void
+    const g = await setup(undefined, () => new Promise<boolean>(resolve => { closed = () => resolve(true) }))
+    await g.tap(); await g.tap(); await g.frame(); await g.tap()
+    expect(g.box('voice-status')?.content).toBe('● Sending')
+    expect(g.box('primary-hint')).toBeUndefined()
+    expect(g.box('secondary-hint')).toBeUndefined()
+    await g.tap(Gesture.DOUBLE_CLICK_EVENT)
+    closed()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(g.sentWavs.map(wav => wav.size)).toEqual([48])
+    expect(g.bridge.shutDownPageContainer).not.toHaveBeenCalled()
+  })
+
   it('sends the captured PCM once on tap and returns to the reader', async () => {
     const g = await setup()
     await g.frame()
@@ -246,14 +279,13 @@ describe('glasses microphone', () => {
     expect(g.box('body')?.content).toBe('Answer')
   })
 
-  it('keeps recording through phone suspension and past one minute, and discards on request', async () => {
+  it('keeps recording past one minute and discards on request', async () => {
     const g = await setup()
     await g.tap(); await g.tap(); await g.frame()
     await g.update({ reply: reply(1, 'Arrived during recording') })
     expect(g.box('voice-status')?.yPosition).toBe(g.box('title')?.yPosition)
     expect(g.box('voice-status')?.xPosition).toBeGreaterThan(g.box('title')!.xPosition!)
     await g.tap(Gesture.LONG_PRESS_EVENT)
-    g.controller.suspend()
     await vi.advanceTimersByTimeAsync(65_000)
     expect(g.bridge.audioControl).toHaveBeenCalledTimes(1)
     expect(g.box('voice-status')?.content).toBe(listeningLabel(0))
@@ -314,7 +346,8 @@ describe('glasses microphone', () => {
     await g.tap(); await g.tap(); await g.frame(); await g.tap()
     expect(g.box('voice-status')?.content).toBe('● Sending')
     expect(g.box('voice-status')?.yPosition).toBe(0)
-    expect(g.box('secondary-hint')?.yPosition).toBe(261)
+    expect(g.box('secondary-hint')).toBeUndefined()
+    expect(g.box('page-arrows')).toBeUndefined()
     await g.tap(Gesture.SYSTEM_EXIT_EVENT)
     resume()
     await vi.advanceTimersByTimeAsync(0)

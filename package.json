@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "npm run build && wrangler dev --assets ./dist --port 5173",
     "build": "vite build",
+    "pack:release": "node scripts/pack-release.mjs",
     "preview": "wrangler dev --assets ./dist",
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
@@ -15,7 +16,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.15",
+    "@evenrealities/even_hub_sdk": "^0.0.16",
     "@evenrealities/pretext": "^0.1.4",
     "ably": "^2.28.0",
     "idb-keyval": "^6.3.0",

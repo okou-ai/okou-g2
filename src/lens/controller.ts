@@ -63,6 +63,7 @@ export class LensController {
     const { reply } = view
     const changedReply = changedThread || reply?.id !== this.view.reply?.id || reply?.text !== this.view.reply?.text
     this.view = view
+    if (view.pending) this.menu = null
     if (changedThread) {
       this.readSeq = 0
       try { if (view.thread) this.readSeq = Number(localStorage.getItem(readKey(view.thread))) || 0 }
@@ -77,10 +78,9 @@ export class LensController {
     this.draw()
   }
 
-  suspend() {
-    // The phone can lock while the glasses are still in use. Actual lens exit,
-    // sign-out and workspace changes still close the microphone.
-    if (this.stage === 'reader') this.reset('quiet')
+  private get screenStage(): Exclude<Stage, 'stopping'> {
+    if (this.stage === 'stopping' || (this.stage === 'reader' && this.view.pending)) return 'sending'
+    return this.stage
   }
 
   close() {
@@ -141,6 +141,7 @@ export class LensController {
     if (this.closed || !gesture) return
     const type = gesture.eventType ?? Gesture.CLICK_EVENT
     if (type === Gesture.SYSTEM_EXIT_EVENT || type === Gesture.ABNORMAL_EXIT_EVENT) {
+      if (type === Gesture.ABNORMAL_EXIT_EVENT) console.warn('Even App reported an abnormal G2 exit', this.screenStage)
       this.leaveDisplay()
       return
     }
@@ -156,6 +157,14 @@ export class LensController {
       return
     }
     if (event.listEvent) return
+    if (type === Gesture.SCROLL_TOP_EVENT || type === Gesture.SCROLL_BOTTOM_EVENT) {
+      if (this.stage === 'quiet') return
+      const step = type === Gesture.SCROLL_TOP_EVENT ? -1 : 1
+      this.pageIndex = Math.max(0, Math.min(this.pages.length - 1, this.pageIndex + step))
+      this.draw()
+      return
+    }
+    if (this.screenStage === 'sending') return
     if (type === Gesture.LONG_PRESS_EVENT) {
       if (this.stage === 'reader') {
         this.menu = { task: this.view.task }
@@ -164,14 +173,9 @@ export class LensController {
     } else if (type === Gesture.DOUBLE_CLICK_EVENT) {
       if (this.stage === 'quiet') void this.exitToLauncher(1)
       else if (this.stage === 'reader') this.reset('quiet')
-      else if (this.stage === 'sending') void this.exitToLauncher(1)
       else this.reset('reader')
     } else if (type === Gesture.CLICK_EVENT) {
       void this.tap()
-    } else if (this.stage !== 'quiet') {
-      const step = type === Gesture.SCROLL_TOP_EVENT ? -1 : 1
-      this.pageIndex = Math.max(0, Math.min(this.pages.length - 1, this.pageIndex + step))
-      this.draw()
     }
   }
 
@@ -284,7 +288,8 @@ export class LensController {
 
   private page(): LensPage {
     const mode = this.stage === 'reader' || this.stage === 'quiet' ? this.stage : 'voice'
-    const working = this.view.working || this.view.pending || this.stage === 'stopping' || this.stage === 'sending'
+    const stage = this.screenStage
+    const working = this.view.working || this.view.pending || stage === 'sending'
     const unread = (this.view.reply?.seqId ?? 0) > this.readSeq
     const indicator = working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
     const body = mode === 'quiet' ? '' : this.pages[this.pageIndex]
@@ -292,13 +297,11 @@ export class LensController {
       this.pageIndex > 0 ? '∧' : '', this.pageIndex + 1 < this.pages.length ? '∨' : '',
     ].filter(Boolean).join(' ')
     let status = '', primaryHint = '', secondaryHint = ''
-    switch (this.stage) {
+    switch (stage) {
       case 'quiet': break
       case 'reader':
-        if (this.view.pending) status = '● Sending'
-        else if (working) status = '● Working'
-        else status = this.note || this.view.status
-        primaryHint = this.view.canRecord && !this.view.pending ? 'Tap to speak' : 'Tap to refresh'
+        status = working ? '● Working' : this.note || this.view.status
+        primaryHint = this.view.canRecord ? 'Tap to speak' : 'Tap to refresh'
         secondaryHint = 'Hold: menu'
         break
       case 'starting': secondaryHint = 'Double-tap: discard'; break
@@ -309,10 +312,8 @@ export class LensController {
         primaryHint = 'Tap to send'
         secondaryHint = 'Double-tap: discard'
         break
-      case 'stopping':
       case 'sending':
         status = '● Sending'
-        secondaryHint = this.stage === 'sending' ? 'Double-tap: launcher' : 'Double-tap: discard'
         break
     }
     if (this.menu) {

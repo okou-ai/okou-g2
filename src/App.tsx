@@ -21,8 +21,8 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     engine.current = client
     void client.refresh()
     const resume = () => {
+      // Phone visibility does not determine whether the wearer is using the lens.
       if (document.visibilityState === 'visible') void client.refresh()
-      else controller.current?.suspend()
     }
     window.addEventListener('online', resume)
     document.addEventListener('visibilitychange', resume)

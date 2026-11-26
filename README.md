@@ -6,7 +6,7 @@ Speak to a dedicated Okou conversation from Even G2 glasses and read replies on 
 
 Use the Even Hub Beta package for all product validation on the glasses. Accept the tester invitation, then open **Me → Beta tester → Okou → Install** in the Even Realities app using the invited account. Open Okou from the glasses launcher. [Even Hub Beta testing](https://hub.evenrealities.com/docs/test/beta-testing)
 
-To install your own build with the developer account, open **Even Hub → Me → Apps → Private builds** on the phone and install the version listed under **Private builds** in the portal. Launch it from the phone. Starting with 0.4.6, the line under **Okou for Even G2** shows the running version before sign-in. [Even Hub developer installation](https://hub.evenrealities.com/docs/test/private-testing)
+To install your own build with the developer account, open **Even Hub → Me → Apps → Private builds** on the phone and launch it from there. Private builds support brief background use. Use the Beta tester installation for the five-minute locked-phone check. The line under **Okou for Even G2** shows the running version before sign-in. [Even Hub developer installation](https://hub.evenrealities.com/docs/test/private-testing)
 
 The installed Beta requests a device code directly from Clerk. If this step fails, version 0.4.3 and later show the build, WebView origin and any available HTTP status on the phone. After approval, version 0.4.5 opens the conversation through the public Okou MCP endpoint. If the WebView cannot reach this endpoint, the phone displays its origin for diagnosing CORS.
 
@@ -14,7 +14,7 @@ The installed Beta requests a device code directly from Clerk. If this step fail
 
 1. Select **Sign in with Okou** on the phone. Open the displayed authorization page in a browser, enter the device code, choose a workspace and return to the Even App. Returning checks authorization. If needed, tap **Check authorization**.
 2. The first sign-in creates a conversation titled **Even G2**. Opening the app again on the same installation restores that conversation. Each Okou account and workspace has its own binding.
-3. The lens starts quiet. A steady dot in the upper right means a reply is unread. A pulsing dot means Okou is working. Tap to open the latest assistant reply. It stays on the same page during **● Sending** and **● Working**, until a new reply arrives.
+3. The lens starts quiet. A steady dot in the upper right means a reply is unread. A pulsing dot means Okou is working. Tap to open the latest assistant reply. Locking the phone keeps your place on the lens. During **● Sending** you can turn pages using the center arrows. Both bottom corners are empty until an action is available again.
 4. Swipe through the reply. Each page fits up to eight lines. The center of the footer shows **∨** for the next page, **∧** for the previous page, or **∧ ∨** for both. A single-page reply has no arrows. Double-tap in the reader to go quiet. A long press there opens **Cancel current task**, **Back to main menu** (the glasses launcher), and **Back to Okou** (the reader).
 5. Tap from the reader to record. **● Listening MM:SS** appears in the upper-right header, with the primary gesture at the bottom left and secondary gestures at the bottom right. Swipe to continue reading while recording or sending. Tap to send the recording or double-tap to discard it. Capture continues across segment boundaries until you send or discard. If local storage fills, the microphone stops and the captured audio is available to send. The public G2 SDK provides microphone audio, so Okou sends the recording without a live transcript.
 6. Use **Sign out** on the phone to change account or workspace.
@@ -46,16 +46,24 @@ npm run dev
 
 The development command builds the frontend and serves it with the Worker at `http://localhost:5173` for local debugging.
 
-## Release a Beta
+## Release the developer build and Beta
 
-For each new Beta, increment the version in `app.json`, build the client and pack it with the Even Hub CLI.
+Commit G2 changes directly to `main` and push them. Every release updates both Even Hub install paths from that commit. Select two unused numeric versions with the higher one in `app.json` for Beta. The portal requires unique versions and moves a promoted build out of the Private builds list.
+
+In a clean checkout of the pushed revision, install the locked dependencies and verify it. Pass the developer version to the release command. For example, with Beta `0.4.17` in `app.json`, run:
 
 ```sh
-npm run build
-npm exec --yes --package=@evenrealities/evenhub-cli@0.2.0 -- evenhub pack app.json dist -o okou.ehpk --sdk-ver 0.0.15
+npm ci
+npm run typecheck
+npm test
+npm run pack:release -- 0.4.16
 ```
 
-Upload `okou.ehpk` to the Okou project in Even Hub and publish that version to the Beta channel. For the session check, sign in, note the conversation ID, fully close the Even app and reopen the Beta on a different loopback port. Confirm it opens the same conversation and that an explicit sign-out persists after another reopen. For the voice check, send a recording and verify the reply on the lens.
+The command checks the revision against remote `main`, builds the client once, and packs the same `dist` files twice. Only the outer manifest version differs. Both phone screens show the client version from `app.json`.
+
+Upload both files from `build/` to the Okou project, leave the developer version in Private builds, and promote the Beta version. Refresh the portal and check both install lists. Compare each portal download with its local package and check the intended tester's invitation status.
+
+For the session check, sign in, note the conversation ID, fully close the Even app and reopen the Beta on a different loopback port. Confirm it opens the same conversation and that an explicit sign-out persists after another reopen. Lock the phone for at least five minutes, then turn a page on the lens. For the voice check, send a recording and verify the reply.
 
 ## G2 Worker
 
