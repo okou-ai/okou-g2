@@ -126,6 +126,7 @@ export class DeviceAuth {
         if (code === 'access_denied') message = 'Authorization was declined.'
         else if (code === 'invalid_grant') message = 'This device code is no longer valid. Start a new sign-in in the Even App.'
         else if (code === 'mcp_grant_required') message = MCP_GRANT_PROMPT
+        else if (error instanceof AuthError && code === 'mcp_grant_incomplete') message = error.message
         else if (code === 'workspace_grant_required') message = 'Authorize again and choose an Okou workspace.'
         else if (code !== 'expired_token') message = 'Could not finish device sign-in. Start again.'
       }

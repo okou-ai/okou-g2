@@ -79,7 +79,7 @@ describe('fixed conversation', () => {
       const first = state.thread
       for (failure of [503, 401, 404, 'FORBIDDEN']) {
         await chat.refresh()
-        expect(state.error).toBeTruthy()
+        expect(state.error).toContain('get_chat_messages')
         expect(created).toEqual([first])
       }
       failure = 'NOT_FOUND'
@@ -188,8 +188,7 @@ describe('voice delivery', () => {
         uploads++
         expect(init.method).toBe('PUT')
         expect(init.credentials).toBe('omit')
-        expect(new Headers(init.headers).has('authorization')).toBe(false)
-        expect(new Headers(init.headers).get('x-amz-meta-artifact-id')).toBe(file)
+        expect(init.headers).toEqual({ 'content-type': 'audio/wav', 'x-amz-meta-artifact-id': file })
         return new Response(null, { status: 200 })
       }
       const call = tool(url, init)

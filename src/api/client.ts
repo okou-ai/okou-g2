@@ -18,8 +18,8 @@ const uploadStatus: Readonly<Record<string, number | undefined>> = {
 }
 
 export class ApiError extends Error {
-  constructor(readonly status: number | null, readonly code?: string) {
-    super('Okou MCP ' + (status ? 'returned ' + status : 'tool failed') + (code ? ' (' + code + ')' : ''))
+  constructor(tool: Tool, readonly status: number | null, readonly code?: string) {
+    super('Okou MCP ' + tool + (status ? ' returned HTTP ' + status : ' failed') + (code ? ' (' + code + ')' : ''))
   }
 
   get missingThread() { return this.status === null && (this.code === 'NOT_FOUND' || this.code === 'CHAT_THREAD_NOT_FOUND') }
@@ -60,16 +60,16 @@ export class OkouApiClient {
     }).catch((error: unknown) => {
       this.signal.throwIfAborted()
       if (error instanceof TypeError && typeof location !== 'undefined') {
-        throw new Error('Could not reach api.okou.ai/mcp from ' + location.origin + '.', { cause: error })
+        throw new Error(tool + ' could not reach api.okou.ai/mcp from ' + location.origin + '.', { cause: error })
       }
       throw error
     })
-    if (!response.ok) throw new ApiError(response.status)
+    if (!response.ok) throw new ApiError(tool, response.status)
     // Okou's stateless tools return a single JSON-RPC result with structured content.
     const reply = await response.json() as ToolReply<T>
     if (reply.jsonrpc !== '2.0' || reply.id !== id) throw new Error('Invalid MCP response')
     if (reply.error) throw new Error('Okou MCP rejected ' + tool + ' (' + reply.error.code + ')')
-    if (reply.result?.isError) throw new ApiError(null, reply.result.structuredContent?.error?.code)
+    if (reply.result?.isError) throw new ApiError(tool, null, reply.result.structuredContent?.error?.code)
     const body = reply.result?.structuredContent
     if (!body || typeof body !== 'object') throw new Error('Missing MCP tool result')
     return body
@@ -94,9 +94,13 @@ export class OkouApiClient {
     headers.delete('authorization')
     headers.set('content-type', audio.type)
     const response = await fetch(prepared.uploadUrl, {
-      method: 'PUT', headers, body: audio, credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: this.signal,
+      method: 'PUT', headers: Object.fromEntries(headers), body: audio, credentials: 'omit', redirect: 'error',
+      referrerPolicy: 'no-referrer', signal: this.signal,
+    }).catch(() => {
+      this.signal.throwIfAborted()
+      throw new VoiceUploadError('storage_upload_failed', 502, 'Could not upload the recording to R2.')
     })
-    if (!response.ok) throw new VoiceUploadError('storage_upload_failed', 502, 'Voice upload failed (' + response.status + ')')
+    if (!response.ok) throw new VoiceUploadError('storage_upload_failed', 502, 'R2 recording upload returned HTTP ' + response.status + '.')
     const completed = await this.uploadTool<{ id: string }>('complete_voice_upload', { id: prepared.id })
     if (completed.id !== prepared.id) throw new VoiceUploadError('invalid_upload_receipt', 502, 'Invalid voice upload receipt')
     return prepared.id
