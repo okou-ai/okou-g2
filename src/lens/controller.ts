@@ -3,7 +3,7 @@ import { getTextWidth } from '@evenrealities/pretext'
 import type { RecordedVoice } from './recording'
 import { startRecording, type Recorder } from './audio'
 import type { LensReply, TaskTarget } from './messages'
-import { indicatorUpdate, listeningLabel, statusUpdate, startupPage, lensPage, menuItems, paginate, type LensPage, type Menu } from './screens'
+import { indicatorUpdate, listeningLabel, statusUpdate, startupPage, lensPage, menuItems, paginate, type LensPage } from './screens'
 
 export interface LensView {
   thread: string | null
@@ -23,7 +23,7 @@ const readKey = (thread: string) => 'okou.g2.last-read.' + thread
 export class LensController {
   private view: LensView = { thread: null, reply: null, working: false, task: null, status: '', canRecord: false, pending: false }
   private stage: Stage = 'quiet'
-  private menu: { kind: Menu; task?: TaskTarget | null } | null = null
+  private menu: { task: TaskTarget | null } | null = null
   private readSeq = 0
   private pages: string[] = ['']
   private pageIndex = 0
@@ -106,7 +106,7 @@ export class LensController {
     this.menu = null
     this.stage = next
     this.note = ''
-    this.pageIndex = 0
+    if (next === 'quiet') this.pageIndex = 0
     this.draw()
   }
 
@@ -157,9 +157,10 @@ export class LensController {
     }
     if (event.listEvent) return
     if (type === Gesture.LONG_PRESS_EVENT) {
-      if (this.stage === 'reader') this.menu = { kind: 'reader', task: this.view.task }
-      if (this.stage === 'recording' || this.stage === 'review') this.menu = { kind: 'voice' }
-      this.draw()
+      if (this.stage === 'reader') {
+        this.menu = { task: this.view.task }
+        this.draw()
+      }
     } else if (type === Gesture.DOUBLE_CLICK_EVENT) {
       if (this.stage === 'quiet') void this.exitToLauncher(1)
       else if (this.stage === 'reader') this.reset('quiet')
@@ -167,7 +168,7 @@ export class LensController {
       else this.reset('reader')
     } else if (type === Gesture.CLICK_EVENT) {
       void this.tap()
-    } else if (this.stage === 'reader') {
+    } else if (this.stage !== 'quiet') {
       const step = type === Gesture.SCROLL_TOP_EVENT ? -1 : 1
       this.pageIndex = Math.max(0, Math.min(this.pages.length - 1, this.pageIndex + step))
       this.draw()
@@ -177,7 +178,7 @@ export class LensController {
   private selectAction(event: NonNullable<EvenHubEvent['listEvent']>) {
     const menu = this.menu
     if (!menu || (event.containerID !== undefined && event.containerID !== 5)) return
-    const items = menuItems(menu.kind)
+    const items = menuItems()
     const item = event.currentSelectItemName
       ? items.find(entry => entry.label === event.currentSelectItemName)
       : items[event.currentSelectItemIndex ?? 0]
@@ -195,14 +196,6 @@ export class LensController {
         }
         break
       }
-      case 'send': {
-        if (this.stage !== 'stopping') { void this.tap(); break }
-        // Local storage may have filled while the menu was open.
-        const version = this.revision
-        void this.micCleanup.then(() => { if (version === this.revision) void this.sendClip() })
-        break
-      }
-      case 'discard': this.reset('reader'); break
     }
   }
 
@@ -224,7 +217,7 @@ export class LensController {
         if (version === this.revision) void this.finishRecording(false)
       }
       const recorder = await startRecording(this.bridge, onStorageFailure, () => {
-        if (this.stage === 'recording' && !this.menu) this.draw()
+        if (this.stage === 'recording') this.draw()
       })
       if (version !== this.revision) { await recorder.cancel(); return }
       this.recorder = recorder
@@ -295,6 +288,9 @@ export class LensController {
     const unread = (this.view.reply?.seqId ?? 0) > this.readSeq
     const indicator = working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
     const body = mode === 'quiet' ? '' : this.pages[this.pageIndex]
+    const scrollHint = mode === 'quiet' || this.menu ? '' : [
+      this.pageIndex > 0 ? '∧' : '', this.pageIndex + 1 < this.pages.length ? '∨' : '',
+    ].filter(Boolean).join(' ')
     let status = '', primaryHint = '', secondaryHint = ''
     switch (this.stage) {
       case 'quiet': break
@@ -311,7 +307,7 @@ export class LensController {
         if (this.stage === 'recording') status = listeningLabel(this.recorder!.seconds)
         else status = this.note || 'Recording ready'
         primaryHint = 'Tap to send'
-        secondaryHint = 'Hold: menu · Double-tap: discard'
+        secondaryHint = 'Double-tap: discard'
         break
       case 'stopping':
       case 'sending':
@@ -323,7 +319,7 @@ export class LensController {
       primaryHint = 'Tap to select'
       secondaryHint = 'Swipe: choose · Double-tap: back'
     }
-    return { mode, menu: this.menu?.kind ?? null, body, status, primaryHint, secondaryHint, indicator }
+    return { mode, menu: !!this.menu, body, status, primaryHint, scrollHint, secondaryHint, indicator }
   }
 
   private animateWork(enabled: boolean) {
@@ -336,7 +332,7 @@ export class LensController {
     this.renderQueue = this.renderQueue.then(async () => {
       if (this.closed || !this.active) return
       const page = this.page()
-      const key = JSON.stringify([page.menu, page.mode, page.body, getTextWidth(page.status), page.primaryHint, page.secondaryHint])
+      const key = JSON.stringify([page.menu, page.mode, page.body, getTextWidth(page.status), page.primaryHint, page.scrollHint, page.secondaryHint])
       // PCM crosses one whole second per phase: bright for one second, dim
       // for one second. No callbacks run just to animate an idle WebView.
       const recording = this.stage === 'recording' && !!this.recorder

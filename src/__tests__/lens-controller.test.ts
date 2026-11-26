@@ -93,38 +93,53 @@ describe('glasses reader', () => {
     await g.update({ reply: answer })
     await g.tap()
     const first = g.box('body')?.content
-    expect(first).toMatch(/^Line 1\n/)
+    expect(first).toBe(lines.slice(0, 8).join('\n'))
+    expect(g.box('page-arrows')?.content).toBe('∨')
     await g.tap(Gesture.SCROLL_TOP_EVENT)
     expect(g.box('body')?.content).toBe(first)
     await g.tap(Gesture.SCROLL_BOTTOM_EVENT)
     const middle = g.box('body')?.content
-    expect(middle).not.toEqual(first)
+    expect(middle).toBe(lines.slice(8, 16).join('\n'))
+    expect(g.box('page-arrows')?.content).toBe('∧ ∨')
     await g.update({ reply: { ...answer }, working: true, task })
     expect(g.box('body')?.content).toBe(middle)
     await g.tap(Gesture.SCROLL_TOP_EVENT)
     expect(g.box('body')?.content).toBe(first)
     for (let n = 0; n < 4; n++) await g.tap(Gesture.SCROLL_BOTTOM_EVENT)
     expect(g.box('body')?.content).toMatch(/Line 18$/)
+    expect(g.box('page-arrows')?.content).toBe('∧')
     await g.update({ reply: reply(3, 'New answer') })
     await g.tap(Gesture.SCROLL_TOP_EVENT)
     expect(g.box('body')?.content).toBe('New answer')
+    expect(g.box('page-arrows')).toBeUndefined()
   })
 
-  it('keeps the selected page of the previous answer through sending, working and completion', async () => {
+  it('reads and turns the same reply through recording, sending, working and completion', async () => {
     const g = await setup()
-    const answer = reply(1, Array.from({ length: 12 }, (_, i) => 'Line ' + i).join('\n'))
+    const answer = reply(1, Array.from({ length: 20 }, (_, i) => 'Line ' + i).join('\n'))
     await g.update({ reply: answer })
     await g.tap()
     await g.tap(Gesture.SCROLL_BOTTOM_EVENT)
     const selected = g.box('body')?.content
-    expect(selected).toMatch(/^Line 7/)
+    expect(selected).toMatch(/^Line 8/)
     let delivered!: () => void
     g.send.mockImplementationOnce(() => new Promise(resolve => { delivered = () => resolve('sent') }))
     await g.tap()
+    expect(g.box('body')?.content).toBe(selected)
     await g.frame()
+    await g.tap(Gesture.SCROLL_BOTTOM_EVENT)
+    expect(g.box('body')?.content).toMatch(/^Line 16/)
+    expect(g.box('page-arrows')?.content).toBe('∧')
+    expect(g.box('voice-status')?.content).toBe(listeningLabel(0))
+    expect(g.bridge.audioControl.mock.calls).toEqual([[true, expect.anything()]])
+    expect(g.send).not.toHaveBeenCalled()
     await g.tap()
     expect(g.box('voice-status')?.content).toBe('● Sending')
+    expect(g.box('body')?.content).toMatch(/^Line 16/)
+    await g.tap(Gesture.SCROLL_TOP_EVENT)
     expect(g.box('body')?.content).toBe(selected)
+    expect(g.box('page-arrows')?.content).toBe('∧ ∨')
+    expect(g.send).toHaveBeenCalledTimes(1)
     await g.update({ reply: answer, pending: true })
     delivered()
     await vi.advanceTimersByTimeAsync(0)
@@ -164,13 +179,22 @@ describe('glasses reader', () => {
       expect(left.width!).toBeLessThan(right.xPosition!)
       expect(right.yPosition! + right.height!).toBe(288)
     }
-    await g.update({ working: true, task })
+    await g.update({ working: true, task, reply: reply(1, '中'.repeat(600)) })
     await g.tap()
     corners('Tap to speak', 'Hold: menu', '● Working')
-    await g.tap()
-    corners('Tap to send', 'Hold: menu · Double-tap: discard', listeningLabel(0))
     await g.tap(Gesture.LONG_PRESS_EVENT)
-    corners('Tap to select', 'Swipe: choose · Double-tap: back', listeningLabel(0))
+    corners('Tap to select', 'Swipe: choose · Double-tap: back', '● Working')
+    expect(g.box('page-arrows')).toBeUndefined()
+    await g.tap(Gesture.DOUBLE_CLICK_EVENT)
+    await g.tap()
+    await g.tap(Gesture.SCROLL_BOTTOM_EVENT)
+    corners('Tap to send', 'Double-tap: discard', listeningLabel(0))
+    const arrows = g.box('page-arrows')!
+    expect(arrows.content).toBe('∧ ∨')
+    expect(Math.abs(arrows.xPosition! + getTextWidth(arrows.content!) / 2 - 288)).toBeLessThanOrEqual(0.5)
+    expect(arrows.yPosition).toBe(g.box('primary-hint')!.yPosition)
+    expect(arrows.xPosition!).toBeGreaterThan(g.box('primary-hint')!.width!)
+    expect(arrows.xPosition! + arrows.width!).toBeLessThan(g.box('secondary-hint')!.xPosition!)
   })
 
   it('uses the selected native menu action and never cancels a replacement task', async () => {
@@ -198,7 +222,7 @@ describe('glasses reader', () => {
 })
 
 describe('glasses microphone', () => {
-  it.each(['tap', 'menu'])('sends captured PCM as a WAV once through the %s action and returns to the reader', async (action) => {
+  it('sends the captured PCM once on tap and returns to the reader', async () => {
     const g = await setup()
     await g.frame()
     await g.tap()
@@ -207,11 +231,7 @@ describe('glasses microphone', () => {
     expect(g.box('voice-status')?.content).toBe('● Listening ００:００')
     expect(g.box('body')?.content).toBe('')
     await g.frame(); await g.frame()
-    if (action === 'menu') {
-      await g.tap(Gesture.LONG_PRESS_EVENT)
-      expect(g.options()).toEqual(['Send now', 'Discard message'])
-      await g.select()
-    } else await g.tap()
+    await g.tap()
     expect(g.send).toHaveBeenCalledTimes(1)
     const [thread] = g.send.mock.calls[0]!
     const [audio] = g.sentWavs
@@ -236,8 +256,8 @@ describe('glasses microphone', () => {
     g.controller.suspend()
     await vi.advanceTimersByTimeAsync(65_000)
     expect(g.bridge.audioControl).toHaveBeenCalledTimes(1)
-    expect(g.options()).toEqual(['Send now', 'Discard message'])
-    await g.select(1)
+    expect(g.box('voice-status')?.content).toBe(listeningLabel(0))
+    await g.tap(Gesture.DOUBLE_CLICK_EVENT)
     expect(g.box('body')?.content).toBe('Arrived during recording')
     await g.tap(Gesture.DOUBLE_CLICK_EVENT)
     expect(g.box('indicator')?.content).toBe('')

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { measureTextWrap } from '@evenrealities/pretext'
 
+import { BODY } from '../lens/display'
 import { markdownToPlainText } from '../lens/markdown'
 import { taskState, type ChatFact } from '../lens/messages'
 import { paginate } from '../lens/screens'
@@ -22,6 +24,35 @@ describe('markdownToPlainText', () => {
     const pages = paginate(text)
     expect(pages.length).toBeGreaterThan(1)
     expect(pages.join('').replaceAll('\n', '')).toBe(text)
+  })
+})
+
+describe('reply pagination', () => {
+  it('fills eight native lines of Chinese or proportional English before turning the page', () => {
+    const full = '中'.repeat(28 * 8)
+    expect(paginate(full)).toEqual([full])
+    expect(paginate(full + '文')).toEqual([full, '文'])
+    const prose = 'Read the last reply while recording a voice message. '.repeat(35).trim()
+    const pages = paginate(prose)
+    expect(pages.join('')).toBe(prose)
+    for (const page of pages.slice(0, -1)) {
+      expect(measureTextWrap(page, BODY.width)).toMatchObject({ lineCount: 8, height: BODY.height })
+      expect(page.endsWith(' ')).toBe(true)
+    }
+  })
+
+  it('retains a paragraph break at a page turn and fits whole emoji within the native byte limit', () => {
+    const lines = Array.from({ length: 8 }, (_, i) => 'Line ' + i).join('\n')
+    expect(paginate(lines + '\n\nNext paragraph')).toEqual([lines, '\nNext paragraph'])
+    const family = '👨‍👩‍👧‍👦'
+    const text = family.repeat(100)
+    const pages = paginate(text)
+    expect(pages.join('')).toBe(text)
+    for (const page of pages) {
+      expect(page.replaceAll(family, '')).toBe('')
+      expect(new TextEncoder().encode(page).length).toBeLessThanOrEqual(999)
+      expect(measureTextWrap(page, BODY.width).height).toBeLessThanOrEqual(BODY.height)
+    }
   })
 })
 
