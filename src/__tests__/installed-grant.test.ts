@@ -31,20 +31,20 @@ it('starts at the issuer from a static package and distinguishes pending approva
 })
 
 it('restores chat with an existing MCP grant and requests consent if its audience is incompatible', async () => {
-  const response = (aud: string, scopes = CHAT_SCOPES) => {
+  const response = (aud: string | string[] | undefined, scopes = CHAT_SCOPES) => {
     const jwt = new UnsecuredJWT({ aud, sub: 'user_fixture', org_id: 'org_fixture',
       client_id: DEVICE_CLIENT_ID, scp: scopes }).setExpirationTime('1h').encode()
     return Response.json({ access_token: jwt, token_type: 'Bearer', refresh_token: 'rotating-fixture' })
   }
   const fetch = vi.fn().mockResolvedValueOnce(grant('first-fixture'))
-    .mockResolvedValueOnce(response(MCP_URL)).mockResolvedValueOnce(response('https://other.example'))
-    .mockResolvedValueOnce(response('https://other.example')).mockResolvedValueOnce(response(MCP_URL, ['user:org:read', 'okou:chat:read']))
+    .mockResolvedValueOnce(response([MCP_URL])).mockResolvedValueOnce(response('https://other.example'))
+    .mockResolvedValueOnce(response(['https://other.example'])).mockResolvedValueOnce(response(undefined, ['user:org:read', 'okou:chat:read']))
   vi.stubGlobal('fetch', fetch)
   await new InstalledGrant().token('fixture')
   expect(await new InstalledGrant().refresh()).toMatchObject({ userId: 'user_fixture' })
   await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'mcp_grant_required', status: 401 })
   await expect(new InstalledGrant().token('new-code')).rejects.toMatchObject({
-    code: 'mcp_grant_incomplete', message: expect.stringContaining('MCP audience'),
+    code: 'mcp_grant_incomplete', message: expect.stringContaining('different resource'),
   })
   await expect(new InstalledGrant().token('another-code')).rejects.toMatchObject({
     code: 'mcp_grant_incomplete', message: expect.stringContaining('okou:chat:send'),
@@ -68,7 +68,7 @@ it('restores a sealed rotating grant after a reload and revokes the latest crede
   await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'signed_out' })
   const forms = fetch.mock.calls.map(([, init]) => Object.fromEntries(new URLSearchParams(String(init.body))))
   expect(forms[0]).toMatchObject({ resource: MCP_URL })
-  expect(forms[1]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'first-fixture', resource: MCP_URL })
+  expect(forms[1]).toEqual({ client_id: DEVICE_CLIENT_ID, grant_type: 'refresh_token', refresh_token: 'first-fixture' })
   expect(forms[2]).toMatchObject({ grant_type: 'refresh_token', refresh_token: 'next-fixture' })
   expect(forms[3]).toMatchObject({ token: 'next-fixture', token_type_hint: 'refresh_token' })
   expect(forms[3]).not.toHaveProperty('resource')

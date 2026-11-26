@@ -124,7 +124,7 @@ export class InstalledGrant {
     if (previous?.handle && previous.handle !== expectedHandle) throw new AuthError('signed_out', 401)
     let response: Response
     try {
-      response = await clerk('/oauth/token', { ...params, resource: MCP_URL })
+      response = await clerk('/oauth/token', params)
     } catch (error) {
       if (previous && error instanceof AuthError && ['invalid_target', 'invalid_scope'].includes(error.code)) {
         throw new AuthError('mcp_grant_required', 401)
@@ -157,10 +157,11 @@ export class InstalledGrant {
     // An explicit sign-in can replace an unreadable installation.
     const saved = await this.read().catch(() => undefined)
     if (saved?.deviceHash === hash) return this.renew(saved)
-    return this.exchange({ grant_type: DEVICE_GRANT, device_code: deviceCode }, hash)
+    return this.exchange({ grant_type: DEVICE_GRANT, device_code: deviceCode, resource: MCP_URL }, hash)
   }
 
   private renew(grant: SavedGrant, retry = true): Promise<DeviceSession> {
+    // Omitting resource on refresh inherits the original Clerk grant, including a device grant without aud.
     return this.exchange({ grant_type: 'refresh_token', refresh_token: grant.refreshToken }, grant.deviceHash, grant, retry)
   }
 
