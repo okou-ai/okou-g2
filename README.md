@@ -6,13 +6,13 @@ Speak to a dedicated Okou conversation from Even G2 glasses and read replies on 
 
 Use the Even Hub Beta package for all product validation on the glasses. Accept the tester invitation, then open **Me → Beta tester → Okou → Install** in the Even Realities app using the invited account. Open Okou from the glasses launcher. [Even Hub Beta testing](https://hub.evenrealities.com/docs/test/beta-testing)
 
-To install your own build with the developer account, open **Even Hub → Me → Apps → Private builds** on the phone and launch it from there. Private builds support brief background use. Use the Beta tester installation for the five-minute locked-phone check. The line under **Okou for Even G2** shows the running version before sign-in. [Even Hub developer installation](https://hub.evenrealities.com/docs/test/private-testing)
+To install your own build with the developer account, open **Even Hub → Me → Apps → Private builds** on the phone and launch it from there. Private builds support brief background use. Use the Beta tester installation for the five-minute locked-phone check. Even Hub shows the version for each channel. [Even Hub developer installation](https://hub.evenrealities.com/docs/test/private-testing)
 
 The installed Beta requests a device code directly from Clerk. If this step fails, version 0.4.3 and later show the build, WebView origin and any available HTTP status on the phone. After approval, version 0.4.5 opens the conversation through the public Okou MCP endpoint. If the WebView cannot reach this endpoint, the phone displays its origin for diagnosing CORS.
 
 ## Sign in and use the glasses
 
-1. Select **Sign in with Okou** on the phone. Open the displayed authorization page in a browser, enter the device code, choose a workspace and return to the Even App. Returning checks authorization. If needed, tap **Check authorization**.
+1. On the phone, tap the sign-in link to select and copy it, or tap **Copy link**. Paste the complete link into your browser, sign in and choose a workspace. The Even App checks for approval after copying and when you return. Once signed in, **How to use** shows the reader, recorder and sending screens. Tap a step or swipe the screenshot to change it. Tap the image to see it at lens resolution.
 2. The first sign-in creates a conversation titled **Even G2**. Opening the app again on the same installation restores that conversation. Each Okou account and workspace has its own binding.
 3. The lens opens on the latest assistant reply. After 15 seconds without a gesture in the reader, the lens goes quiet. A steady dot in the upper right means a reply is unread. A pulsing dot means Okou is working. Tap, double-tap, hold, or swipe to wake the reader. The wake gesture returns you to your place in the reply.
 4. Swipe through the reply. Each page fits up to eight lines. The center of the footer shows **∨** for the next page, **∧** for the previous page, or **∧ ∨** for both. Double-tap in the reader for the system exit prompt. Hold to open the menu with **Cancel current task**, **Back to main menu** (the glasses launcher), and **Back to Okou** (the reader). Hold again to go back.

@@ -31,6 +31,7 @@ export class DeviceAuth {
   private listeners = new Set<() => void>()
   private revision = 0
   private checking?: Challenge
+  private authorizationTimer?: ReturnType<typeof setTimeout>
   private refreshing: Promise<DeviceSession> | null = null
 
   snapshot = () => this.state
@@ -40,19 +41,32 @@ export class DeviceAuth {
   }
 
   private set(state: LoginState) {
+    clearTimeout(this.authorizationTimer)
+    this.authorizationTimer = undefined
     this.state = state
     this.listeners.forEach((listener) => listener())
   }
 
   async restore() {
+    const previous = this.state
+    const checkingApproval = this.authorizationTimer !== undefined || this.checking !== undefined
     const revision = ++this.revision
-    this.set({ phase: 'loading' })
+    if (previous.phase !== 'verify') this.set({ phase: 'loading' })
     try {
       const session = await exclusive('okou-g2/oauth', () => this.grants.refresh())
       if (this.revision === revision) this.accept(session)
     } catch (error) {
       if (this.revision !== revision) return
       if (error instanceof AuthError && error.status === 401) {
+        if (error.code === 'signed_out') {
+          // A late Even bridge can reveal a saved session. If it has none,
+          // keep watching the very link the wearer may already have copied.
+          if (previous.phase === 'verify' && previous.challenge.expiresAt > Date.now()) {
+            if (checkingApproval) this.scheduleCheck(previous.challenge)
+            return
+          }
+          return this.begin()
+        }
         this.set({ phase: 'signed-out', error: error.code === 'mcp_grant_required' ? MCP_GRANT_PROMPT : undefined })
       } else {
         this.set({ phase: 'signed-out', error: 'Could not restore sign-in. Check your connection and try again.' })
@@ -60,21 +74,24 @@ export class DeviceAuth {
     }
   }
 
-  async begin() {
+  async begin(notice?: string) {
     const revision = ++this.revision
     this.set({ phase: 'loading' })
     try {
       const code = await this.grants.device()
       if (revision !== this.revision) return
-      this.wait({ ...code, expiresAt: Date.now() + code.expires_in * 1000, nextPollAt: Date.now() + code.interval * 1000 })
+      this.set({ phase: 'verify', challenge: { ...code, expiresAt: Date.now() + code.expires_in * 1000,
+        nextPollAt: Date.now() + code.interval * 1000 }, notice })
     } catch (error) {
       if (this.revision !== revision) return
       this.set({ phase: 'signed-out', error: deviceStartError(error) })
     }
   }
 
-  private wait(challenge: Challenge, notice?: string) {
-    this.set({ phase: 'verify', challenge, notice })
+  private scheduleCheck(challenge: Challenge) {
+    clearTimeout(this.authorizationTimer)
+    const delay = Math.min(challenge.nextPollAt, challenge.expiresAt) - Date.now()
+    this.authorizationTimer = setTimeout(() => void this.check(), Math.max(0, delay))
   }
 
   async check() {
@@ -83,7 +100,7 @@ export class DeviceAuth {
     if (this.checking === challenge) return
     const remaining = Math.min(challenge.nextPollAt, challenge.expiresAt) - Date.now()
     if (remaining > 0) {
-      this.set({ phase: 'verify', challenge, notice: 'Check again in ' + Math.ceil(remaining / 1000) + 's.' })
+      this.scheduleCheck(challenge)
       return
     }
     this.checking = challenge
@@ -93,7 +110,7 @@ export class DeviceAuth {
 
   private async poll(challenge: Challenge, revision: number) {
     if (revision !== this.revision || this.state.phase !== 'verify') return
-    let message = 'This device code expired. Start sign-in again.'
+    let message = 'This sign-in link expired.'
     if (Date.now() < challenge.expiresAt) {
       try {
         const session = await exclusive('okou-g2/oauth', async () => {
@@ -108,7 +125,9 @@ export class DeviceAuth {
         if (code === 'authorization_pending' || code === 'slow_down' ||
             !(error instanceof AuthError) || error.status === 429 || error.status >= 500) {
           const interval = code === 'authorization_pending' ? challenge.interval : Math.min(60, challenge.interval + 5)
-          this.wait({ ...challenge, interval, nextPollAt: Date.now() + interval * 1000 }, 'Authorization is pending. Check again after approving.')
+          const next = { ...challenge, interval, nextPollAt: Date.now() + interval * 1000 }
+          this.set({ phase: 'verify', challenge: next })
+          this.scheduleCheck(next)
           return
         }
         if (code === 'access_denied') message = 'Authorization was declined.'
@@ -154,7 +173,7 @@ export class DeviceAuth {
     this.set({ phase: 'loading' })
     try {
       await exclusive('okou-g2/oauth', () => this.grants.logout())
-      if (revision === this.revision) this.set({ phase: 'signed-out' })
+      if (revision === this.revision) await this.begin()
     } catch {
       if (revision === this.revision) this.set({ phase: 'signed-out', error: 'Signed out locally. Remote revocation could not be confirmed.' })
     }

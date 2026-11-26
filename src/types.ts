@@ -9,11 +9,17 @@ export interface DeviceSession extends Identity {
   readonly temporary?: boolean
 }
 
-export interface DeviceCode {
+export interface DeviceAuthorizationResponse {
   readonly device_code: string
   readonly user_code: string
   readonly verification_uri: string
+  readonly verification_uri_complete?: string
   readonly expires_in: number
+  readonly interval?: number
+}
+
+export interface DeviceCode extends DeviceAuthorizationResponse {
+  readonly verification_uri_complete: string
   readonly interval: number
 }
 

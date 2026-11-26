@@ -1,6 +1,6 @@
 import { DEVICE_SCOPE, MCP_URL, OAUTH_ISSUER } from '../src/config'
 import { DEVICE_GRANT, McpConsentRequired, deviceCodeHash, parseDeviceCode, parseSession } from '../src/device-protocol'
-import type { DeviceCode, DeviceSession } from '../src/types'
+import type { DeviceAuthorizationResponse, DeviceSession } from '../src/types'
 
 export function json(data: unknown, status = 200, cookie?: string) {
   const headers = new Headers({ 'cache-control': 'no-store' })
@@ -40,7 +40,7 @@ export async function auth(request: Request, action: string, clientId: string): 
     const response = await clerk('/oauth/device_authorization', { client_id: clientId, scope: DEVICE_SCOPE, resource: MCP_URL })
     if (!response.ok) return json({ error: 'device_authorization_failed' }, 502)
     try {
-      return json(parseDeviceCode(await response.json() as DeviceCode))
+      return json(parseDeviceCode(await response.json() as DeviceAuthorizationResponse))
     } catch {
       return json({ error: 'invalid_device_code' }, 502)
     }

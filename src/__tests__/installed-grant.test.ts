@@ -16,7 +16,8 @@ it('starts at the issuer from a static package and distinguishes pending approva
     .mockResolvedValueOnce(Response.json({ error: 'authorization_pending' }, { status: 400 }))
   vi.stubGlobal('fetch', fetch)
   const client = new InstalledGrant()
-  expect(await client.device()).toMatchObject({ interval: 5, user_code: 'TEST' })
+  expect(await client.device()).toMatchObject({ interval: 5,
+    verification_uri_complete: 'https://accounts.okou.ai/activate?user_code=TEST' })
   await expect(client.token('fixture')).rejects.toMatchObject({ code: 'authorization_pending' })
   expect(fetch.mock.calls.map(([url]) => url)).toEqual([OAUTH_ISSUER + '/oauth/device_authorization', OAUTH_ISSUER + '/oauth/token'])
   for (const [, init] of fetch.mock.calls) {
@@ -25,6 +26,15 @@ it('starts at the issuer from a static package and distinguishes pending approva
     expect(new Headers(init.headers).get('content-type')).toBe('application/x-www-form-urlencoded')
   }
   expect(Object.fromEntries(new URLSearchParams(String(fetch.mock.calls[0][1].body)))).toEqual({ client_id: DEVICE_CLIENT_ID, scope: DEVICE_SCOPE, resource: MCP_URL })
+})
+
+it('uses the complete verification URL issued by Clerk with its original parameters', async () => {
+  const link = 'https://accounts.okou.ai/device?user_code=A%2BB&lang=en'
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(Response.json({
+    device_code: 'private-fixture', user_code: 'A+B', expires_in: 90,
+    verification_uri: 'https://accounts.okou.ai/device', verification_uri_complete: link,
+  })))
+  expect((await new InstalledGrant().device()).verification_uri_complete).toBe(link)
 })
 
 it('restores chat with an existing MCP grant and requests consent if its audience is incompatible', async () => {

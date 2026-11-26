@@ -3,7 +3,7 @@ import { DeviceAuth } from '../auth'
 import { AuthError, InstalledGrant } from '../installed-grant'
 import { version } from '../../app.json'
 const code = { user_code: 'FIXTURE', device_code: 'fixture-only', verification_uri: 'https://example.test/activate',
-  expires_in: 90, interval: 2 }
+  verification_uri_complete: 'https://example.test/activate?user_code=FIXTURE', expires_in: 90, interval: 2 }
 const session = () => ({ accessToken: 'test-access', userId: 'user_test', orgId: 'org_test', expiresAt: Date.now() + 60_000 })
 
 beforeEach(() => { vi.useFakeTimers() })
@@ -21,7 +21,25 @@ it('reports the installed build, origin and a safe OAuth failure without exposin
   expect(auth.snapshot()).toMatchObject({ error: 'Device sign-in failed (HTTP 403). G2 ' + version + ' · http://127.0.0.1:50496' })
 })
 
-it('honours the device interval, slow_down and a workspace grant', async () => {
+it('provides a link on first open and keeps it when the native host arrives late', async () => {
+  const grants = new InstalledGrant()
+  vi.spyOn(grants, 'refresh').mockRejectedValue(new AuthError('signed_out', 401))
+  const device = vi.spyOn(grants, 'device').mockResolvedValue(code)
+  const token = vi.spyOn(grants, 'token').mockResolvedValue(session())
+  const auth = new DeviceAuth(grants)
+  await auth.restore()
+  expect(auth.snapshot()).toMatchObject({ phase: 'verify', challenge: code })
+  await vi.advanceTimersByTimeAsync(3000)
+  expect(token).not.toHaveBeenCalled()
+  await auth.restore()
+  expect(device).toHaveBeenCalledTimes(1)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(token).not.toHaveBeenCalled()
+  await auth.check()
+  expect(auth.snapshot().phase).toBe('ready')
+})
+
+it('checks a copied link until approval at the interval requested by the issuer', async () => {
   const grants = new InstalledGrant()
   vi.spyOn(grants, 'device').mockResolvedValue(code)
   const token = vi.spyOn(grants, 'token')
@@ -30,20 +48,17 @@ it('honours the device interval, slow_down and a workspace grant', async () => {
   const auth = new DeviceAuth(grants)
   await auth.begin()
   expect(auth.snapshot().phase).toBe('verify')
-  vi.advanceTimersByTime(1999)
   await auth.check()
+  await vi.advanceTimersByTimeAsync(1999)
   expect(token).not.toHaveBeenCalled()
-  vi.advanceTimersByTime(1)
-  await auth.check()
-  vi.advanceTimersByTime(2000)
-  await auth.check()
+  await vi.advanceTimersByTimeAsync(2001)
   expect(token).toHaveBeenCalledTimes(2)
-  vi.advanceTimersByTime(6999)
-  await auth.check()
+  await vi.advanceTimersByTimeAsync(6999)
   expect(token).toHaveBeenCalledTimes(2)
-  vi.advanceTimersByTime(1)
-  await auth.check()
+  await vi.advanceTimersByTimeAsync(1)
   expect(auth.snapshot()).toMatchObject({ phase: 'ready', session: { orgId: 'org_test' } })
+  await vi.advanceTimersByTimeAsync(90_000)
+  expect(token).toHaveBeenCalledTimes(3)
 })
 
 it('checks the current device code on return and stops after the user declines it', async () => {

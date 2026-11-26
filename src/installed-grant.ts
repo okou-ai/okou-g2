@@ -1,6 +1,6 @@
 import { DEVICE_CLIENT_ID, DEVICE_SCOPE, MCP_URL, OAUTH_ISSUER } from './config'
 import { DEVICE_GRANT, McpConsentRequired, deviceCodeHash, parseDeviceCode, parseSession } from './device-protocol'
-import type { DeviceCode, DeviceSession } from './types'
+import type { DeviceAuthorizationResponse, DeviceSession } from './types'
 import { connectBridge } from './glasses'
 import { grantKey, migrateGrant, parseGrant, put, type Grant, type InstallStorage } from './install-storage'
 
@@ -31,7 +31,7 @@ export class InstalledGrant {
   async device() {
     const response = await clerk('/oauth/device_authorization', { scope: DEVICE_SCOPE, resource: MCP_URL })
     try {
-      return parseDeviceCode(await response.json() as DeviceCode)
+      return parseDeviceCode(await response.json() as DeviceAuthorizationResponse)
     } catch {
       throw new AuthError('invalid_device_response', response.status)
     }

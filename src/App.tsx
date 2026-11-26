@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { version } from '../app.json'
+import { DeviceConnectType } from '@evenrealities/even_hub_sdk'
 import { DeviceAuth } from './auth'
-import { connectBridge, describeConnection, initialGlassesState, onDeviceStatus } from './glasses'
+import { connectBridge } from './glasses'
+import { SignIn } from './phone/SignIn'
+import { HowToUse } from './phone/HowToUse'
 import { LensController, type LensView } from './lens/controller'
 import { DeviceChat, initialChat } from './sync/engine'
 
@@ -12,7 +14,8 @@ export default function App({ auth }: { auth: DeviceAuth }) {
   const engine = useRef<DeviceChat | null>(null)
   const controller = useRef<LensController | null>(null)
   const [chat, setChat] = useState(initialChat)
-  const [glasses, setGlasses] = useState(initialGlassesState)
+  const [lensError, setLensError] = useState('')
+  const [connection, setConnection] = useState<DeviceConnectType>()
 
   useLayoutEffect(() => {
     setChat(initialChat)
@@ -53,15 +56,13 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     let detach: (() => void) | undefined
     let lens: LensController | undefined
     const onError = (message: string) => {
-      if (!disposed) setGlasses((state) => state.error === message ? state : { ...state, error: message })
+      if (!disposed) setLensError(message)
     }
     void (async () => {
       const bridge = await connectBridge()
       if (disposed) return
-      if (!bridge) { setGlasses((s) => ({ ...s, phase: 'unavailable' })); return }
-      setGlasses((s) => ({ ...s, phase: 'ready' }))
-      detach = onDeviceStatus(bridge, ({ connectType, batteryLevel, isWearing }) =>
-        setGlasses((s) => ({ ...s, connectType, batteryLevel, isWearing })))
+      if (!bridge) return
+      detach = bridge.onDeviceStatusChanged(status => setConnection(status.connectType))
       lens = new LensController(bridge, async (id, audio) => {
         const client = engine.current
         if (!client) throw new Error('Sign in before sending a recording')
@@ -72,54 +73,28 @@ export default function App({ auth }: { auth: DeviceAuth }) {
       controller.current = lens
       lens.update(currentView.current)
       await lens.start()
-      if (!disposed) setGlasses((s) => ({ ...s, pageReady: true }))
     })().catch(() => onError('Could not open the glasses display. Reopen Okou in the Even App.'))
     return () => { disposed = true; detach?.(); lens?.close(); controller.current = null }
   }, [])
 
   return <main>
-    <header><h1>Okou for Even G2</h1><p className="hint">Version {version} · {describeConnection(glasses)}</p></header>
-    {login.phase === 'loading' && <section className="card" role="status">Opening Okou…</section>}
-    {login.phase === 'signed-out' && <section className="card">
-      <h2>Connect your glasses</h2>
-      <p className="hint">Sign in to Okou and choose the workspace for your G2 conversation.</p>
-      <button onClick={() => void auth.begin()}>Sign in with Okou</button>
-      {login.error && <p className="error" role="alert">{login.error}</p>}
-    </section>}
-    {login.phase === 'verify' && <section className="card">
-      <h2>Authorize this G2</h2>
-      <p>Enter this code on the Okou authorization page, choose a workspace, then return here.</p>
-      <p className="device-code">{login.challenge.user_code}</p>
-      <a className="button" href={login.challenge.verification_uri} target="_blank" rel="noopener noreferrer">Open authorization page</a>
-      <button onClick={() => void auth.check()}>Check authorization</button>
-      {login.notice && <p role="status">{login.notice}</p>}
-      <p className="hint verification-url">{login.challenge.verification_uri}</p>
-      <button className="link" onClick={() => void auth.signOut()}>Cancel</button>
-    </section>}
-    {login.phase === 'ready' && <>
-      {login.session.temporary && <p className="error" role="status">Signed in for this launch only. Even App could not save your session.</p>}
-      <section className="card">
-        <h2>Even G2 conversation</h2>
-        {chat.thread && <p className="mono">{chat.thread}</p>}
-        <p role="status">{chat.pending ? 'Checking the last voice message for delivery…'
-          : chat.error ? 'Could not sync this conversation.' : !chat.thread ? 'Opening conversation…'
-          : chat.live ? 'Listening for replies' : 'Live updates disconnected'}</p>
-        {chat.error && <p className="error" role="alert">{chat.error}</p>}
-        {chat.pending && <button onClick={() => void engine.current?.retryPending().catch((error: Error) =>
-          setGlasses((state) => ({ ...state, error: error.message })))}>Retry the same voice message</button>}
-        {chat.reply && <p className="reply">{chat.reply.text}</p>}
-        <button className="link" disabled={chat.syncing} onClick={() => void engine.current?.refresh()}>
+    {login.phase === 'ready' ? <>
+      <HowToUse onSignOut={() => void auth.signOut()} />
+      {login.session.temporary && <p className="phone-notice" role="status">Signed in for this launch only. Even App could not save your session.</p>}
+      {chat.error && <div className="phone-notice" role="alert">
+        <p>{chat.error}</p>
+        <button type="button" className="text-link" disabled={chat.syncing} onClick={() => void engine.current?.refresh()}>
           {chat.syncing ? 'Refreshing…' : 'Refresh conversation'}
         </button>
-      </section>
-      <section className="card">
-        <h2>On the glasses</h2>
-        <p>The glasses open on the latest reply. Tap to record, hold for the menu, or double-tap for the system exit prompt. After 15 seconds without a gesture, the reader sleeps. Any gesture wakes it.</p>
-        <p>While recording, tap to send or hold to discard. The center arrows show which way you can swipe through the reply, even while recording or sending.</p>
-        <p className="hint">Workspace <span className="mono">{orgId}</span></p>
-        <button className="link" onClick={() => void auth.signOut()}>Sign out</button>
-      </section>
-    </>}
-    {glasses.error && <p className="error" role="alert">{glasses.error}</p>}
+      </div>}
+      {chat.pending && <div className="phone-notice" role="status">
+        <p>Checking the last voice message for delivery…</p>
+        <button type="button" className="text-link" onClick={() => void engine.current?.retryPending()
+          .catch((error: Error) => setLensError(error.message))}>Retry the same voice message</button>
+      </div>}
+    </> : <SignIn auth={auth} login={login} />}
+    {connection === DeviceConnectType.Disconnected && <p className="phone-notice" role="status">G2 disconnected.</p>}
+    {connection === DeviceConnectType.ConnectionFailed && <p className="phone-notice" role="alert">G2 connection failed.</p>}
+    {lensError && <p className="phone-notice problem" role="alert">{lensError}</p>}
   </main>
 }

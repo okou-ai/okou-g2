@@ -1,18 +1,21 @@
 import { decodeJwt, type JWTPayload } from 'jose'
 import { CANCEL_SCOPE, CHAT_SCOPES, MCP_URL } from './config'
-import type { DeviceCode, DeviceSession } from './types'
+import type { DeviceAuthorizationResponse, DeviceCode, DeviceSession } from './types'
 
 export const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
 
-export function parseDeviceCode(data: DeviceCode): DeviceCode {
+export function parseDeviceCode(data: DeviceAuthorizationResponse): DeviceCode {
   const url = new URL(data.verification_uri)
+  const link = new URL(data.verification_uri_complete ?? url.href)
   const interval = data.interval ?? 5
   if (typeof data.device_code !== 'string' || !data.device_code ||
       typeof data.user_code !== 'string' || !data.user_code || url.protocol !== 'https:' ||
-      url.username || url.password || !Number.isSafeInteger(data.expires_in) || data.expires_in <= 0 ||
+      url.username || url.password || link.protocol !== 'https:' || link.origin !== url.origin || link.username || link.password ||
+      !Number.isSafeInteger(data.expires_in) || data.expires_in <= 0 ||
       !Number.isSafeInteger(interval) || interval <= 0) throw new Error('Invalid device code')
+  if (!data.verification_uri_complete) link.searchParams.set('user_code', data.user_code)
   return { device_code: data.device_code, user_code: data.user_code, verification_uri: url.href,
-    expires_in: data.expires_in, interval }
+    verification_uri_complete: link.href, expires_in: data.expires_in, interval }
 }
 
 export const MCP_GRANT_PROMPT = 'Sign in again to authorize this device for Okou chat.'
