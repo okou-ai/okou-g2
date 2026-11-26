@@ -26,7 +26,6 @@ export class DeviceChat {
   private readonly store: DeviceStore
   private history: History | null = null
   private unwatch?: () => void
-  private fallback?: ReturnType<typeof setInterval>
   private refreshing: Promise<void> | null = null
   private dirty = false
   private sending = false
@@ -42,13 +41,6 @@ export class DeviceChat {
     if (this.abort.signal.aborted) return
     this.state = { ...this.state, ...patch }
     this.onChange(this.state)
-  }
-
-  start() {
-    this.fallback = setInterval(() => {
-      if (!this.state.live && document.visibilityState === 'visible') void this.refresh()
-    }, 30_000)
-    return this.refresh()
   }
 
   private async bind(missingThread?: string) {
@@ -203,7 +195,6 @@ export class DeviceChat {
 
   close() {
     this.abort.abort()
-    clearInterval(this.fallback)
     this.unwatch?.()
   }
 }

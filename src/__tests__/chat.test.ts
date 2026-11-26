@@ -79,7 +79,7 @@ describe('fixed conversation', () => {
     let state: ChatState = initialChat
     const chat = new DeviceChat(owner, async () => 'fixture', s => { state = s })
     try {
-      await chat.start()
+      await chat.refresh()
       const first = state.thread
       for (failure of [503, 401, 404, 'FORBIDDEN']) {
         await chat.refresh()
@@ -174,7 +174,7 @@ describe('cancel current task', () => {
     let scope = CHAT_SCOPES.join(' ')
     const chat = new DeviceChat(identity(), async () => new UnsecuredJWT({ scope }).encode(), () => {})
     try {
-      await chat.start()
+      await chat.refresh()
       await expect(chat.cancelTask('other-thread', { kind: 'run', id: runId })).rejects.toThrow()
       await chat.cancelTask(thread, { kind: 'event', id: eventId })
       await expect(chat.cancelTask(thread, { kind: 'run', id: runId })).rejects.toThrow('sign in again to grant permission')
@@ -236,7 +236,7 @@ describe('voice delivery', () => {
     } } as unknown as EvenAppBridge
     const storageError = vi.fn()
     const chat = new DeviceChat(owner, async () => 'fixture', () => {})
-    await chat.start()
+    await chat.refresh()
     const recorder = await startRecording(bridge, storageError)
     const feed = (bytes: Uint8Array) => listener({ audioEvent: { audioPcm: bytes } } as EvenHubEvent)
     try {
@@ -308,11 +308,11 @@ describe('voice delivery', () => {
     const open = () => new DeviceChat(owner, async () => 'fixture', (s) => { state = s })
     let chat = open()
     try {
-      await chat.start()
+      await chat.refresh()
       const wav = new RecordedVoice()
       await wav.finish(new ArrayBuffer(4))
       await expect(chat.sendVoice(thread, wav)).resolves.toBe('pending')
-      await chat.refresh(); chat.close(); chat = open(); await chat.start()
+      await chat.refresh(); chat.close(); chat = open(); await chat.refresh()
       expect(state.pending).toBe(true)
       expect(sends).toHaveLength(1)
       expect(sends[0]).toEqual({ threadId: thread, clientEventId: expect.any(String),

@@ -22,7 +22,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     if (!userId || !orgId) return
     const client = new DeviceChat({ userId, orgId }, () => auth.accessToken(userId, orgId), setChat)
     engine.current = client
-    void client.start()
+    void client.refresh()
     const resume = () => {
       if (document.visibilityState === 'visible') void client.refresh()
       else controller.current?.suspend()
@@ -104,7 +104,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
         {chat.thread && <p className="mono">{chat.thread}</p>}
         <p role="status">{chat.pending ? 'Checking the last voice message for delivery…'
           : chat.error ? 'Could not sync this conversation.' : !chat.thread ? 'Opening conversation…'
-          : chat.live ? 'Listening for replies' : 'Checking for replies'}</p>
+          : chat.live ? 'Listening for replies' : 'Live updates disconnected'}</p>
         {chat.error && <p className="error" role="alert">{chat.error}</p>}
         {chat.pending && <button onClick={() => void engine.current?.retryPending().catch((error: Error) =>
           setGlasses((state) => ({ ...state, error: error.message })))}>Retry the same voice message</button>}
