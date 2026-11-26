@@ -5,12 +5,13 @@ import {
 
 export type LensMode = 'quiet' | 'reader' | 'voice'
 export type Menu = 'reader' | 'voice'
-export type Indicator = 'off' | 'unread' | 'working' | 'listening'
+export type Indicator = 'off' | 'unread' | 'working'
 export interface LensPage {
   mode: LensMode
   menu: Menu | null
   body: string
-  listening: string
+  status: string
+  hint: string
   indicator: Indicator
 }
 
@@ -39,7 +40,7 @@ function text(id: number, name: string, content: string, x: number, y: number, w
 }
 
 const DOT = { containerID: 3, containerName: 'indicator' }
-const DOT_GLYPH = '•'
+const DOT_GLYPH = '●'
 export function indicatorUpdate(level: number) {
   return new TextContainerUpgrade({ ...DOT, content: level ? DOT_GLYPH : ' ', textColor: level })
 }
@@ -47,53 +48,53 @@ export function indicatorUpdate(level: number) {
 const VOICE = { containerID: 4, containerName: 'voice-status' }
 export function listeningLabel(seconds: number) {
   const minutes = String(Math.floor(seconds / 60)).padStart(2, '0')
-  return '· Listening ' + minutes + ':' + String(seconds % 60).padStart(2, '0')
+  return '● Listening ' + minutes + ':' + String(seconds % 60).padStart(2, '0')
 }
-export function listeningUpdate(content: string, level: number) {
+export function statusUpdate(content: string, level: number) {
   return new TextContainerUpgrade({ ...VOICE, content, textColor: level })
 }
 
 function layout(page: LensPage, level: number) {
-  const title = text(2, 'title', 'Okou', 4, 0, page.listening ? 336 : 490, 34)
-  const dot = text(DOT.containerID, DOT.containerName, page.indicator === 'off' || !level ? '' : DOT_GLYPH, 560, 0, 16, 34)
-  dot.textColor = level
+  const boxes: TextContainerProperty[] = []
+  if (page.mode !== 'quiet') boxes.push(text(2, 'title', 'OKOU', 4, 0, 320, 34))
+  if (page.status) {
+    const status = text(VOICE.containerID, VOICE.containerName, page.status, 356, 0, 220, 34)
+    status.textColor = level
+    boxes.push(status)
+  } else {
+    const dot = text(DOT.containerID, DOT.containerName, page.indicator === 'off' ? '' : DOT_GLYPH, 548, 0, 28, 34)
+    dot.textColor = level
+    boxes.push(dot)
+  }
+  if (page.hint) boxes.push(text(6, 'gesture-hint', page.hint, 4, 254, 568, 34))
   if (page.menu) {
     const items = menuItems(page.menu)
     const list = new ListContainerProperty({
       containerID: 5, containerName: 'actions', xPosition: 4, yPosition: 36,
-      width: 568, height: 248, isEventCapture: 1,
+      width: 568, height: 214, isEventCapture: 1,
       itemContainer: new ListItemContainerProperty({
         itemCount: items.length, itemName: items.map(item => item.label), isItemSelectBorderEn: 1,
       }),
     })
-    return { containerTotalNum: 3, textObject: [title, dot], listObject: [list] }
+    return { containerTotalNum: boxes.length + 1, textObject: boxes, listObject: [list] }
   }
-
-  const boxes = [text(1, 'body', page.body, 4, 36, 568, page.mode === 'voice' ? 210 : 252)]
-  if (page.mode !== 'quiet') boxes.push(title)
-  if (page.listening) {
-    const status = text(VOICE.containerID, VOICE.containerName, page.listening, 356, 0, 220, 34)
-    status.textColor = level
-    boxes.push(status)
-  } else {
-    boxes.push(dot)
-  }
+  boxes.push(text(1, 'body', page.body, 4, 36, 568, 214))
   return { containerTotalNum: boxes.length, textObject: boxes }
 }
 
 export const startupPage = () => new CreateStartUpPageContainer(layout({
-  mode: 'quiet', menu: null, body: '', listening: '', indicator: 'off',
+  mode: 'quiet', menu: null, body: '', status: '', hint: '', indicator: 'off',
 }, 4))
 
 export const lensPage = (page: LensPage, level: number) => new RebuildPageContainer(layout(page, level))
 
-/** Budget eight lines per page. The display wraps soft lines with its own font;
+/** Budget seven lines per page. The display wraps soft lines with its own font;
  * explicit line breaks in lists and code stay intact. */
 export function paginate(text: string): string[] {
   const pages: string[] = []
   let page = '', lines = 1, width = 0
   const newLine = (explicit: boolean) => {
-    if (lines === 8) {
+    if (lines === 7) {
       pages.push(page)
       page = ''
       lines = 1

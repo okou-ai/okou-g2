@@ -12,7 +12,7 @@ interface Challenge extends DeviceCode {
 export type LoginState =
   | { phase: 'loading' }
   | { phase: 'signed-out'; error?: string }
-  | { phase: 'verify'; challenge: Challenge }
+  | { phase: 'verify'; challenge: Challenge; notice?: string }
   | { phase: 'ready'; session: DeviceSession }
 
 const CHALLENGE = 'okou-g2/device-code'
@@ -33,7 +33,7 @@ export class DeviceAuth {
   private state: LoginState = { phase: 'loading' }
   private listeners = new Set<() => void>()
   private revision = 0
-  private timer?: ReturnType<typeof setTimeout>
+  private checking?: Challenge
   private refreshing: Promise<DeviceSession> | null = null
 
   snapshot = () => this.state
@@ -49,7 +49,6 @@ export class DeviceAuth {
 
   async restore() {
     const revision = ++this.revision
-    clearTimeout(this.timer)
     this.set({ phase: 'loading' })
     try {
       let consentError: string | undefined
@@ -71,7 +70,8 @@ export class DeviceAuth {
       if (data) {
         const challenge: Challenge = JSON.parse(data)
         if (challenge.expiresAt > Date.now()) {
-          this.wait(challenge, revision)
+          this.wait(challenge)
+          await this.check()
           return
         }
         sessionStorage.removeItem(CHALLENGE)
@@ -84,23 +84,34 @@ export class DeviceAuth {
 
   async begin() {
     const revision = ++this.revision
-    clearTimeout(this.timer)
     this.set({ phase: 'loading' })
     try {
       const code = await this.grants.device()
       if (revision !== this.revision) return
-      this.wait({ ...code, expiresAt: Date.now() + code.expires_in * 1000, nextPollAt: Date.now() + code.interval * 1000 }, revision)
+      this.wait({ ...code, expiresAt: Date.now() + code.expires_in * 1000, nextPollAt: Date.now() + code.interval * 1000 })
     } catch (error) {
       if (this.revision !== revision) return
       this.set({ phase: 'signed-out', error: deviceStartError(error) })
     }
   }
 
-  private wait(challenge: Challenge, revision: number) {
-    try { sessionStorage.setItem(CHALLENGE, JSON.stringify(challenge)) } catch { /* The open page can still poll. */ }
-    this.set({ phase: 'verify', challenge })
-    this.timer = setTimeout(() => void this.poll(challenge, revision),
-      Math.max(0, Math.min(challenge.nextPollAt, challenge.expiresAt) - Date.now()))
+  private wait(challenge: Challenge, notice?: string) {
+    try { sessionStorage.setItem(CHALLENGE, JSON.stringify(challenge)) } catch { /* Keep the challenge in memory. */ }
+    this.set({ phase: 'verify', challenge, notice })
+  }
+
+  async check() {
+    if (this.state.phase !== 'verify') return
+    const { challenge } = this.state
+    if (this.checking === challenge) return
+    const remaining = Math.min(challenge.nextPollAt, challenge.expiresAt) - Date.now()
+    if (remaining > 0) {
+      this.set({ phase: 'verify', challenge, notice: 'Check again in ' + Math.ceil(remaining / 1000) + 's.' })
+      return
+    }
+    this.checking = challenge
+    try { await this.poll(challenge, this.revision) }
+    finally { if (this.checking === challenge) this.checking = undefined }
   }
 
   private async poll(challenge: Challenge, revision: number) {
@@ -120,7 +131,7 @@ export class DeviceAuth {
         if (code === 'authorization_pending' || code === 'slow_down' ||
             !(error instanceof AuthError) || error.status === 429 || error.status >= 500) {
           const interval = code === 'authorization_pending' ? challenge.interval : Math.min(60, challenge.interval + 5)
-          this.wait({ ...challenge, interval, nextPollAt: Date.now() + interval * 1000 }, revision)
+          this.wait({ ...challenge, interval, nextPollAt: Date.now() + interval * 1000 }, 'Authorization is pending. Check again after approving.')
           return
         }
         if (code === 'access_denied') message = 'Authorization was declined.'
@@ -136,7 +147,6 @@ export class DeviceAuth {
   }
 
   private accept(session: DeviceSession) {
-    clearTimeout(this.timer)
     try {
       sessionStorage.removeItem(CHALLENGE)
       localStorage.removeItem(SIGNED_OUT)
@@ -171,7 +181,6 @@ export class DeviceAuth {
 
   async signOut() {
     const revision = ++this.revision
-    clearTimeout(this.timer)
     try { localStorage.setItem(SIGNED_OUT, '1') } catch { /* A memory-only session can still sign out. */ }
     try { sessionStorage.removeItem(CHALLENGE) } catch { /* Revocation still proceeds. */ }
     this.set({ phase: 'loading' })

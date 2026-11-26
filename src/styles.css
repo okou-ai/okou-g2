@@ -96,3 +96,11 @@ button.link {
 .verification-url { margin-top: 0.75rem; overflow-wrap: anywhere; }
 .reply { white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--line); padding-top: 1rem; line-height: 1.55; }
 p { line-height: 1.5; }
+
+/* Drive the glasses' working indicator with browser animation events. The
+   phone page needs no visual change or JavaScript frame loop. */
+:root.lens-working { animation: lens-working 1s linear infinite; }
+@keyframes lens-working {
+  from { --lens-phase: 0; }
+  to { --lens-phase: 1; }
+}

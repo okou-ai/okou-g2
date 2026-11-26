@@ -2,7 +2,7 @@ import { OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent } fro
 import type { RecordedVoice } from './recording'
 import { startRecording, type Recorder } from './audio'
 import type { LensMessage, TaskTarget } from './messages'
-import { indicatorUpdate, listeningLabel, listeningUpdate, startupPage, lensPage, menuItems, paginate, type LensPage, type Menu } from './screens'
+import { indicatorUpdate, listeningLabel, statusUpdate, startupPage, lensPage, menuItems, paginate, type LensPage, type Menu } from './screens'
 
 export interface LensView {
   thread: string | null
@@ -16,9 +16,6 @@ export interface LensView {
 type Stage = 'quiet' | 'reader' | 'starting' | 'recording' | 'stopping' | 'review' | 'sending'
 type Voice = (target: string, audio: RecordedVoice) => Promise<'sent' | 'pending'>
 
-const IDLE_MS = 30_000
-const PULSE_MS = 300
-const PULSE_LEVELS = [4, 2, 0, 2] as const
 const readKey = (thread: string) => 'okou.g2.last-read.' + thread
 
 export class LensController {
@@ -33,14 +30,17 @@ export class LensController {
   private recorder: Recorder | null = null
   private clip: RecordedVoice | null = null
   private revision = 0
-  private idleTimer?: ReturnType<typeof setTimeout>
-  private pulseTimer?: ReturnType<typeof setTimeout>
-  private pulseStep = 0
   private unsubscribe?: () => void
   private renderQueue = Promise.resolve()
   private lastPage = ''
   private lastDotLevel = 0
-  private lastListening = ''
+  private dim = false
+  private readonly heartbeat = (event: AnimationEvent) => {
+    if (event.animationName !== 'lens-working' || event.target !== document.documentElement) return
+    this.dim = !this.dim
+    this.draw()
+  }
+  private lastStatus = ''
   private active = true
   private closed = false
   private micCleanup: Promise<void> = Promise.resolve()
@@ -52,6 +52,7 @@ export class LensController {
   async start() {
     if (await this.bridge.createStartUpPageContainer(startupPage()) !== 0) throw new Error('Could not open the G2 display')
     if (this.closed) return
+    if (typeof document !== 'undefined') document.documentElement?.addEventListener('animationiteration', this.heartbeat)
     this.unsubscribe = this.bridge.onEvenHubEvent((event) => this.handle(event))
     this.draw()
   }
@@ -85,8 +86,9 @@ export class LensController {
 
   close() {
     this.closed = true
+    if (typeof document !== 'undefined') document.documentElement?.removeEventListener('animationiteration', this.heartbeat)
+    this.animateWork(false)
     this.unsubscribe?.()
-    clearTimeout(this.pulseTimer)
     this.reset('quiet')
   }
 
@@ -106,27 +108,19 @@ export class LensController {
     this.stage = next
     this.note = ''
     this.pageIndex = 0
-    this.armIdle()
     this.draw()
-  }
-
-  private armIdle() {
-    clearTimeout(this.idleTimer)
-    if (this.active && this.stage === 'reader') this.idleTimer = setTimeout(() => this.reset('quiet'), IDLE_MS)
   }
 
   private showReader(note = '') {
     this.stage = 'reader'
     this.menu = null
     this.note = note
-    this.armIdle()
     this.draw()
   }
 
   private leaveDisplay() {
     this.active = false
-    clearTimeout(this.pulseTimer)
-    this.pulseTimer = undefined
+    this.animateWork(false)
     this.reset('quiet')
   }
 
@@ -157,7 +151,6 @@ export class LensController {
     if (type === Gesture.FOREGROUND_EXIT_EVENT || type === Gesture.LONG_PRESS_RELEASE_EVENT) return
     if (![Gesture.CLICK_EVENT, Gesture.DOUBLE_CLICK_EVENT, Gesture.LONG_PRESS_EVENT,
       Gesture.SCROLL_TOP_EVENT, Gesture.SCROLL_BOTTOM_EVENT].includes(type)) return
-    this.armIdle()
     if (this.menu) {
       if (type === Gesture.DOUBLE_CLICK_EVENT) { this.menu = null; this.draw() }
       else if (type === Gesture.CLICK_EVENT && event.listEvent) this.selectAction(event.listEvent)
@@ -171,7 +164,8 @@ export class LensController {
     } else if (type === Gesture.DOUBLE_CLICK_EVENT) {
       if (this.stage === 'quiet') void this.exitToLauncher(1)
       else if (this.stage === 'reader') this.reset('quiet')
-      else if (this.stage !== 'sending') this.reset('reader')
+      else if (this.stage === 'sending') void this.exitToLauncher(1)
+      else this.reset('reader')
     } else if (type === Gesture.CLICK_EVENT) {
       void this.tap()
     } else if (this.stage === 'reader') {
@@ -219,7 +213,6 @@ export class LensController {
     if (this.stage === 'quiet') { this.showReader(); return }
     if (this.stage !== 'reader') return
     if (!this.view.canRecord || !this.view.thread || this.view.pending) { this.refresh(); return }
-    clearTimeout(this.idleTimer)
     this.stage = 'starting'
     this.note = ''
     this.draw()
@@ -305,21 +298,35 @@ export class LensController {
     const lastReply = this.view.messages.findLast(message => message.role === 'assistant')
     const working = this.view.task !== null || this.sentAfter !== null
     const unread = (lastReply?.seqId ?? 0) > this.readSeq
-    const indicator = this.stage === 'recording' && !this.menu ? 'listening' : working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
-    let body = '', listening = ''
+    const indicator = working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
+    let body = '', status = '', hint = ''
     switch (this.stage) {
       case 'quiet': break
       case 'reader':
-        if (latest?.role === 'user' || this.sentAfter !== null) body = 'Thinking...'
-        else body = latest ? this.pages[this.pageIndex] : this.note || this.view.status
+        if (working || latest?.role === 'user') status = '● Thinking'
+        if (latest?.role === 'assistant') body = this.pages[this.pageIndex]
+        else if (!status) body = this.note || this.view.status
+        hint = this.view.canRecord && !this.view.pending ? 'Hold: menu · Tap to speak' : 'Hold: menu · Tap to refresh'
         break
-      case 'starting': body = 'Opening microphone…'; break
-      case 'recording': if (!this.menu) listening = listeningLabel(this.recorder!.seconds); break
-      case 'stopping': body = 'Finishing recording…'; break
-      case 'review': body = this.note || 'Recording ready'; break
-      case 'sending': body = 'Sending…'; break
+      case 'starting': hint = 'Double-tap: discard'; break
+      case 'recording':
+        status = listeningLabel(this.recorder!.seconds)
+        hint = 'Hold: menu · Tap: send · Double-tap: discard'
+        break
+      case 'stopping': status = '● Sending'; hint = 'Double-tap: discard'; break
+      case 'sending': status = '● Sending'; hint = 'Double-tap: launcher'; break
+      case 'review':
+        body = this.note || 'Recording ready'
+        hint = 'Hold: menu · Tap: send · Double-tap: discard'
+        break
     }
-    return { mode, menu: this.menu?.kind ?? null, body, listening, indicator }
+    if (this.menu) hint = 'Swipe: choose · Tap: select · Double-tap: back'
+    return { mode, menu: this.menu?.kind ?? null, body, status, hint, indicator }
+  }
+
+  private animateWork(enabled: boolean) {
+    if (typeof document !== 'undefined') document.documentElement?.classList.toggle('lens-working', enabled)
+    if (!enabled) this.dim = false
   }
 
   private draw() {
@@ -327,24 +334,23 @@ export class LensController {
     this.renderQueue = this.renderQueue.then(async () => {
       if (this.closed || !this.active) return
       const page = this.page()
-      const key = page.menu ?? JSON.stringify([page.mode, page.body, !!page.listening])
-      const pulse = page.indicator === 'working' || page.indicator === 'listening'
-      if (!pulse) {
-        clearTimeout(this.pulseTimer)
-        this.pulseTimer = undefined
-        this.pulseStep = 0
-      }
-      const level = page.indicator === 'off' ? 0 : PULSE_LEVELS[this.pulseStep]
+      const key = JSON.stringify([page.menu, page.mode, page.body, !!page.status, page.hint])
+      // PCM crosses one whole second per phase: bright for one second, dim
+      // for one second. No callbacks run just to animate an idle WebView.
+      const recording = this.stage === 'recording' && !!this.recorder
+      this.animateWork(!recording && (page.indicator === 'working' || !!page.status))
+      const dim = recording ? this.recorder!.seconds % 2 === 1 : this.dim
+      const level = page.status || page.indicator !== 'off' ? (dim ? 2 : 4) : 0
       const thread = this.view.thread, latest = this.view.messages.at(-1)
       if (key !== this.lastPage) {
         if (!await this.bridge.rebuildPageContainer(lensPage(page, level))) throw new Error('Could not update the G2 display')
         this.lastPage = key
-      } else if (page.listening && (this.lastListening !== page.listening || level !== this.lastDotLevel)) {
-        if (!await this.bridge.textContainerUpgrade(listeningUpdate(page.listening, level))) throw new Error('Could not update the G2 recording status')
+      } else if (page.status && (this.lastStatus !== page.status || level !== this.lastDotLevel)) {
+        if (!await this.bridge.textContainerUpgrade(statusUpdate(page.status, level))) throw new Error('Could not update the G2 recording status')
       } else if (level !== this.lastDotLevel) {
         if (!await this.bridge.textContainerUpgrade(indicatorUpdate(level))) throw new Error('Could not update the G2 indicator')
       }
-      this.lastListening = page.listening
+      this.lastStatus = page.status
       this.lastDotLevel = level
       if (this.closed || !this.active) return
       if (page.mode === 'reader' && !page.menu && this.stage === 'reader' && !this.menu &&
@@ -353,13 +359,6 @@ export class LensController {
         this.readSeq = latest.seqId
         try { localStorage.setItem(readKey(thread), String(this.readSeq)) }
         catch { /* The in-memory cursor still applies to this session. */ }
-      }
-      if (pulse && this.pulseTimer === undefined) {
-        this.pulseTimer = setTimeout(() => {
-          this.pulseTimer = undefined
-          this.pulseStep = (this.pulseStep + 1) % PULSE_LEVELS.length
-          this.draw()
-        }, page.listening ? 700 : PULSE_MS)
       }
     }).catch((error: Error) => {
       this.lastPage = ''

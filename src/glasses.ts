@@ -36,49 +36,15 @@ export const initialGlassesState: GlassesState = {
   connectType: DeviceConnectType.None,
 }
 
-let bridgePromise: Promise<EvenAppBridge | null> | undefined
-
-/**
- * Whether an Even App host is actually listening.
- *
- * The SDK installs its bridge singleton and reports `ready` in any browser, so
- * `waitForEvenAppBridge()` resolves on a plain desktop page too. The host
- * handler the bridge posts through is the only reliable signal, and the Even
- * App injects it asynchronously, so this is polled rather than read once.
- */
-function hasEvenAppHost(): boolean {
-  const host = (window as { flutter_inappwebview?: { callHandler?: unknown } })
-    .flutter_inappwebview
+export function hasEvenAppHost(): boolean {
+  const host = (window as { flutter_inappwebview?: { callHandler?: unknown } }).flutter_inappwebview
   return typeof host?.callHandler === 'function'
 }
 
-async function waitForEvenAppHost(timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (hasEvenAppHost()) return true
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-  return hasEvenAppHost()
+export async function connectBridge(): Promise<EvenAppBridge | null> {
+  if (typeof window === 'undefined' || !hasEvenAppHost()) return null
+  return waitForEvenAppBridge()
 }
-
-/**
- * Resolve the bridge, or null when this page is not hosted by the Even App.
- */
-export function connectBridge(timeoutMs = 15000): Promise<EvenAppBridge | null> {
-  if (!bridgePromise) {
-    bridgePromise = (async () => {
-      if (typeof window === 'undefined') return null
-      try {
-        if (!(await waitForEvenAppHost(timeoutMs))) return null
-        return await waitForEvenAppBridge()
-      } catch {
-        return null
-      }
-    })()
-  }
-  return bridgePromise
-}
-
 
 export function onDeviceStatus(
   bridge: EvenAppBridge,

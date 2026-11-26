@@ -94,6 +94,8 @@ export default function App({ auth }: { auth: DeviceAuth }) {
       <p>Enter this code on the Okou authorization page, choose a workspace, then return here.</p>
       <p className="device-code">{login.challenge.user_code}</p>
       <a className="button" href={login.challenge.verification_uri} target="_blank" rel="noopener noreferrer">Open authorization page</a>
+      <button onClick={() => void auth.check()}>Check authorization</button>
+      {login.notice && <p role="status">{login.notice}</p>}
       <p className="hint verification-url">{login.challenge.verification_uri}</p>
       <button className="link" onClick={() => void auth.signOut()}>Cancel</button>
     </section>}

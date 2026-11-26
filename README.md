@@ -12,11 +12,11 @@ The installed Beta requests a device code directly from Clerk. If this step fail
 
 ## Sign in and use the glasses
 
-1. Select **Sign in with Okou** on the phone. Open the displayed authorization page in a browser, enter the device code, choose a workspace and return to the Even App.
+1. Select **Sign in with Okou** on the phone. Open the displayed authorization page in a browser, enter the device code, choose a workspace and return to the Even App. Returning checks authorization. If needed, tap **Check authorization**.
 2. The first sign-in creates a conversation titled **Even G2**. Opening the app again on the same installation restores that conversation. Each Okou account and workspace has its own binding.
-3. The lens starts quiet. A steady dot in the upper right means a reply is unread. A pulsing dot means Okou is working. Tap to open the latest reply. When the latest message is yours, the reader shows **Thinking...** until an answer arrives.
-4. Swipe to scroll within the displayed reply. Double-tap to go quiet, or leave the reader idle for 30 seconds. A long press opens **Cancel current task**, **Back to main menu** (the glasses launcher), and **Back to Okou** (the reader).
-5. Tap from the reader to record. **Listening...** appears at the lower right. Tap to send or double-tap to discard. A long press offers the same two actions. Capture continues across segment boundaries until you send or discard. If local storage fills, the microphone stops and the captured audio is available to send. The public G2 SDK provides microphone audio, so Okou sends the recording without a live transcript.
+3. The lens starts quiet. A steady dot in the upper right means a reply is unread. A pulsing dot means Okou is working. Tap to open the latest reply. When the latest message is yours, the reader shows **● Thinking** in the upper-right header until an answer arrives.
+4. Swipe to scroll within the displayed reply. Double-tap to go quiet. A long press opens **Cancel current task**, **Back to main menu** (the glasses launcher), and **Back to Okou** (the reader).
+5. Tap from the reader to record. **● Listening MM:SS** appears in the upper-right header, with gesture hints along the bottom. Tap to send or double-tap to discard. A long press offers the same two actions. Capture continues across segment boundaries until you send or discard. If local storage fills, the microphone stops and the captured audio is available to send. The public G2 SDK provides microphone audio, so Okou sends the recording without a live transcript.
 6. Use **Sign out** on the phone to change account or workspace.
 
 ## Device protocol
@@ -27,7 +27,7 @@ The access token stays in memory. The package encrypts the rotating refresh toke
 
 All Okou API operations use authenticated JSON-RPC `tools/call` requests to `https://api.okou.ai/mcp`. Even's package storage keeps a conversation binding per account and workspace. The client reserves a thread ID before calling `create_chat_thread` and reuses it after a lost response. It replaces the binding only when `get_chat_messages` confirms the thread is missing. During the upgrade from 0.4.3 the client can import the old IndexedDB grant and binding if it opens on the old origin. If that origin is unavailable, one new sign-in and conversation may be needed. Development browsers without the Even bridge continue to use IndexedDB.
 
-The upper-right lens status shows `· Listening MM:SS` from captured audio samples and grows to three minute digits after 99:59.
+The upper-right lens status shows `● Listening MM:SS` from captured audio samples and grows to three minute digits after 99:59.
 
 Voice capture stages 16 kHz mono PCM16 locally in 15-second segments encrypted with an in-memory key. On send, it reads at most one WAV (up to 25 MiB) at a time, reuses completed uploads on retry, and submits the ordered voice parts together as one input. Discarding before send clears the local draft. The client calls `prepare_voice_upload`, PUTs the bytes to the signed private R2 URL, and calls `complete_voice_upload`. The signed PUT uses the returned headers and omits the Okou bearer token. The client saves the ordered file IDs and a stable client event ID before calling `send_chat_message` with a version-1 voice part. The server applies the thread's current computer host and browser settings. If delivery is uncertain, the client checks the original input or its promoted row in history. An explicit retry reuses the saved IDs.
 
