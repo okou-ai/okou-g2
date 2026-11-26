@@ -97,9 +97,7 @@ function layout(page: LensPage, level: number) {
   return { containerTotalNum: boxes.length, textObject: boxes }
 }
 
-export const startupPage = () => new CreateStartUpPageContainer(layout({
-  mode: 'quiet', menu: false, body: '', status: '', primaryHint: '', scrollHint: '', secondaryHint: '', indicator: 'off',
-}, 4))
+export const startupPage = (page: LensPage) => new CreateStartUpPageContainer(layout(page, 4))
 
 export const lensPage = (page: LensPage, level: number) => new RebuildPageContainer(layout(page, level))
 

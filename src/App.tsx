@@ -114,7 +114,8 @@ export default function App({ auth }: { auth: DeviceAuth }) {
       </section>
       <section className="card">
         <h2>On the glasses</h2>
-        <p>Tap to read the latest reply. The center arrows show which way you can swipe, even while recording or sending. Long-press in the reader for actions. Tap to record, then tap to send or double-tap to discard.</p>
+        <p>The glasses open on the latest reply. Tap to record, hold for the menu, or double-tap for the system exit prompt. After 15 seconds without a gesture, the reader sleeps. Any gesture wakes it.</p>
+        <p>While recording, tap to send or hold to discard. The center arrows show which way you can swipe through the reply, even while recording or sending.</p>
         <p className="hint">Workspace <span className="mono">{orgId}</span></p>
         <button className="link" onClick={() => void auth.signOut()}>Sign out</button>
       </section>

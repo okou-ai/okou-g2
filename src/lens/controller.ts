@@ -17,10 +17,11 @@ export interface LensView {
 
 type Stage = 'quiet' | 'reader' | 'starting' | 'recording' | 'stopping' | 'review' | 'sending'
 type Voice = (target: string, audio: RecordedVoice) => Promise<'sent' | 'pending'>
+const READER_IDLE_MS = 15_000
 
 export class LensController {
   private view: LensView = { thread: null, reply: null, working: false, task: null, status: '', canRecord: false, pending: false }
-  private stage: Stage = 'quiet'
+  private stage: Stage = 'reader'
   private menu: { task: TaskTarget | null } | null = null
   private readSeq = 0
   private pages: string[] = ['']
@@ -42,6 +43,8 @@ export class LensController {
   private lastStatus = ''
   private active = true
   private closed = false
+  private sleepTimer?: ReturnType<typeof setTimeout>
+  private exitDialog = false
   private micCleanup: Promise<void> = Promise.resolve()
 
   constructor(private readonly bridge: EvenAppBridge, private readonly send: Voice,
@@ -49,7 +52,7 @@ export class LensController {
     private readonly cancelTask: (thread: string, task: TaskTarget) => Promise<void>) {}
 
   async start() {
-    if (await this.bridge.createStartUpPageContainer(startupPage()) !== 0) throw new Error('Could not open the G2 display')
+    if (await this.bridge.createStartUpPageContainer(startupPage(this.page())) !== 0) throw new Error('Could not open the G2 display')
     if (this.closed) return
     if (typeof document !== 'undefined') document.documentElement?.addEventListener('animationiteration', this.heartbeat)
     this.unsubscribe = this.bridge.onEvenHubEvent((event) => this.handle(event))
@@ -64,7 +67,7 @@ export class LensController {
     if (view.pending) this.menu = null
     if (changedThread) {
       this.readSeq = 0
-      this.reset('quiet')
+      if (this.stage !== 'quiet') this.resetToReader()
     }
     if (changedReply) {
       this.pageIndex = 0
@@ -84,21 +87,17 @@ export class LensController {
     if (typeof document !== 'undefined') document.documentElement?.removeEventListener('animationiteration', this.heartbeat)
     this.animateWork(false)
     this.unsubscribe?.()
-    this.reset('quiet')
+    this.resetToReader()
   }
 
-  private reset(next: 'quiet' | 'reader') {
+  private resetToReader() {
     this.revision++
     if (this.recorder) {
       this.micCleanup = this.recorder.cancel().catch(() => this.onError('Could not close the microphone'))
     }
     this.recorder = null
     this.clip = null
-    this.menu = null
-    this.stage = next
-    this.note = ''
-    if (next === 'quiet') this.pageIndex = 0
-    this.draw()
+    this.showReader()
   }
 
   private showReader(note = '') {
@@ -110,19 +109,28 @@ export class LensController {
 
   private leaveDisplay() {
     this.active = false
+    this.exitDialog = false
+    this.pageIndex = 0
     this.animateWork(false)
-    this.reset('quiet')
+    this.resetToReader()
   }
 
   private async exitToLauncher(exitMode: 0 | 1) {
     if (exitMode === 0) this.leaveDisplay()
+    else {
+      this.exitDialog = true
+      this.clearSleepTimer()
+    }
     try {
       if (await this.bridge.shutDownPageContainer(exitMode)) return
     } catch { /* Restore the reader if the immediate exit did not complete. */ }
-    if (exitMode === 0 && !this.closed) {
-      this.active = true
-      this.lastPage = ''
-      this.showReader()
+    if (!this.closed) {
+      if (exitMode === 0) {
+        this.active = true
+        this.lastPage = ''
+      }
+      this.exitDialog = false
+      this.draw()
     }
     this.onError('Could not close the G2 page')
   }
@@ -139,17 +147,26 @@ export class LensController {
     if (type === Gesture.FOREGROUND_ENTER_EVENT) { this.active = true; this.lastPage = ''; this.refresh(); this.draw(); return }
     if (!this.active) return
     // The OS also emits FOREGROUND_EXIT when its contextual overlay closes.
-    if (type === Gesture.FOREGROUND_EXIT_EVENT || type === Gesture.LONG_PRESS_RELEASE_EVENT) return
+    if (type === Gesture.FOREGROUND_EXIT_EVENT) {
+      if (this.exitDialog) { this.exitDialog = false; this.draw() }
+      return
+    }
+    if (type === Gesture.LONG_PRESS_RELEASE_EVENT) return
     if (![Gesture.CLICK_EVENT, Gesture.DOUBLE_CLICK_EVENT, Gesture.LONG_PRESS_EVENT,
       Gesture.SCROLL_TOP_EVENT, Gesture.SCROLL_BOTTOM_EVENT].includes(type)) return
+    if (this.stage === 'quiet') { this.showReader(); return }
     if (this.menu) {
-      if (type === Gesture.DOUBLE_CLICK_EVENT) { this.menu = null; this.draw() }
+      if (type === Gesture.LONG_PRESS_EVENT) this.showReader()
       else if (type === Gesture.CLICK_EVENT && event.listEvent) this.selectAction(event.listEvent)
       return
     }
     if (event.listEvent) return
+    if (this.screenStage === 'reader') {
+      this.exitDialog = false
+      this.clearSleepTimer()
+      this.syncSleepTimer()
+    }
     if (type === Gesture.SCROLL_TOP_EVENT || type === Gesture.SCROLL_BOTTOM_EVENT) {
-      if (this.stage === 'quiet') return
       const step = type === Gesture.SCROLL_TOP_EVENT ? -1 : 1
       this.pageIndex = Math.max(0, Math.min(this.pages.length - 1, this.pageIndex + step))
       this.draw()
@@ -160,11 +177,9 @@ export class LensController {
       if (this.stage === 'reader') {
         this.menu = { task: this.view.task }
         this.draw()
-      }
+      } else this.resetToReader()
     } else if (type === Gesture.DOUBLE_CLICK_EVENT) {
-      if (this.stage === 'quiet') void this.exitToLauncher(1)
-      else if (this.stage === 'reader') this.reset('quiet')
-      else this.reset('reader')
+      if (this.stage === 'reader') void this.exitToLauncher(1)
     } else if (type === Gesture.CLICK_EVENT) {
       void this.tap()
     }
@@ -197,7 +212,6 @@ export class LensController {
   private async tap() {
     if (this.stage === 'recording') return this.finishRecording()
     if (this.stage === 'review') return this.sendClip()
-    if (this.stage === 'quiet') { this.showReader(); return }
     if (this.stage !== 'reader') return
     if (!this.view.canRecord || !this.view.thread || this.view.pending) { this.refresh(); return }
     this.stage = 'starting'
@@ -287,13 +301,13 @@ export class LensController {
         primaryHint = this.view.canRecord ? 'Tap to speak' : 'Tap to refresh'
         secondaryHint = 'Hold: menu'
         break
-      case 'starting': secondaryHint = 'Double-tap: discard'; break
+      case 'starting': secondaryHint = 'Hold: discard'; break
       case 'recording':
       case 'review':
         if (this.stage === 'recording') status = listeningLabel(this.recorder!.seconds)
         else status = this.note || 'Recording ready'
         primaryHint = 'Tap to send'
-        secondaryHint = 'Double-tap: discard'
+        secondaryHint = 'Hold: discard'
         break
       case 'sending':
         status = '● Sending'
@@ -301,7 +315,7 @@ export class LensController {
     }
     if (this.menu) {
       primaryHint = 'Tap to select'
-      secondaryHint = 'Swipe: choose · Double-tap: back'
+      secondaryHint = 'Swipe: choose · Hold: back'
     }
     return { mode, menu: !!this.menu, body, status, primaryHint, scrollHint, secondaryHint, indicator }
   }
@@ -311,7 +325,25 @@ export class LensController {
     if (!enabled) this.dim = false
   }
 
+  private clearSleepTimer() {
+    clearTimeout(this.sleepTimer)
+    this.sleepTimer = undefined
+  }
+
+  private syncSleepTimer() {
+    if (this.closed || !this.active || !this.unsubscribe || this.screenStage !== 'reader' || this.menu || this.exitDialog) {
+      this.clearSleepTimer()
+    } else if (this.sleepTimer === undefined) {
+      this.sleepTimer = setTimeout(() => {
+        this.sleepTimer = undefined
+        this.stage = 'quiet'
+        this.draw()
+      }, READER_IDLE_MS)
+    }
+  }
+
   private draw() {
+    this.syncSleepTimer()
     if (this.closed || !this.active || !this.unsubscribe) return
     this.renderQueue = this.renderQueue.then(async () => {
       if (this.closed || !this.active) return
