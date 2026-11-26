@@ -21,7 +21,7 @@ The installed Beta requests a device code directly from Clerk. If this step fail
 
 ## Device protocol
 
-The installed public client uses Clerk's device authorization grant at `https://clerk.okou.ai`. It requests the resource `https://api.okou.ai/mcp` and the scopes `openid profile offline_access user:org:read okou:chat:read okou:chat:send okou:run:cancel`. A saved grant that covers chat on this resource can resume the conversation. If it lacks cancellation permission, selecting **Cancel current task** prompts the user to authorize again on the phone.
+The installed public client uses Clerk's device authorization grant at `https://clerk.okou.ai`. It requests the resource `https://api.okou.ai/mcp` and the scopes `openid profile offline_access user:org:read okou:chat:read okou:chat:send okou:run:cancel`. Clerk device grants can omit `aud`. An explicit audience must include the MCP URL. Refresh inherits the original grant. The API verifies the signed token, workspace membership and tool permissions on each request. If the grant lacks cancellation permission, selecting **Cancel current task** prompts the user to authorize again on the phone.
 
 The access token stays in memory. The package encrypts the rotating refresh token with AES-GCM. Deriving the wrapping key requires both a random seed in Even's package storage and a random share in a first-party, host-only cookie. The cookie spans the loopback ports Even assigns on launch. Signing out clears the local grant and asks Clerk to revoke it. The pending device code is tab-local.
 

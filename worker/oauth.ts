@@ -59,10 +59,10 @@ export async function auth(request: Request, action: string, clientId: string): 
     // response. Redeeming that one-time code again can revoke the issued grant.
     params = grantHash === receipt?.[1]
       ? { grant_type: 'refresh_token', refresh_token: refresh }
-      : { grant_type: DEVICE_GRANT, device_code: input.device_code }
+      : { grant_type: DEVICE_GRANT, device_code: input.device_code, resource: MCP_URL }
   } else return json({ error: 'not_found' }, 404)
 
-  const result = await clerk('/oauth/token', { ...params, client_id: clientId, resource: MCP_URL })
+  const result = await clerk('/oauth/token', { ...params, client_id: clientId })
   const body = await result.json() as Record<string, unknown>
   const refreshing = params.grant_type === 'refresh_token'
   if (!result.ok) {

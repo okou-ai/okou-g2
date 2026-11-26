@@ -12,7 +12,8 @@ import { DeviceStore } from '../store'
 const authDatabase = createStore('okou-g2-auth', 'grants')
 const threadDatabase = createStore('okou-g2-device', 'chat')
 const owner = { userId: 'user_fixture', orgId: 'org_fixture' }
-const access = new UnsecuredJWT({ sub: owner.userId, org_id: owner.orgId, client_id: DEVICE_CLIENT_ID, aud: MCP_URL, scope: DEVICE_SCOPE })
+// Clerk device-code grants may include the requested scopes without an audience.
+const access = new UnsecuredJWT({ sub: owner.userId, org_id: owner.orgId, client_id: DEVICE_CLIENT_ID, scope: DEVICE_SCOPE })
   .setExpirationTime('1h').encode()
 const grant = (refresh_token: string) => Response.json({ access_token: access, token_type: 'Bearer', refresh_token })
 const api = new OkouApiClient(async () => access, new AbortController().signal)
@@ -63,7 +64,9 @@ it('requires both the package store and the host cookie to use a rotating grant,
   vi.stubGlobal('location', new URL('http://127.0.0.1:56844/'))
   await expect(new InstalledGrant(installed.open).refresh()).rejects.toMatchObject({ code: 'signed_out' })
   expect(document.cookie).toBe('')
-  expect(new URLSearchParams(String(fetch.mock.calls[1][1].body)).get('refresh_token')).toBe('fixture-first')
+  expect(Object.fromEntries(new URLSearchParams(String(fetch.mock.calls[1][1].body)))).toEqual({
+    client_id: DEVICE_CLIENT_ID, grant_type: 'refresh_token', refresh_token: 'fixture-first',
+  })
   expect(new URLSearchParams(String(fetch.mock.calls[2][1].body)).get('token')).toBe('fixture-rotated')
   expect(fetch).toHaveBeenCalledTimes(3)
 })

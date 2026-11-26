@@ -41,11 +41,14 @@ export function parseSession(body: Record<string, unknown>, clientId: string): D
       typeof exp !== 'number' || exp * 1000 <= Date.now()) {
     throw new Error('Authorize again and select a workspace')
   }
-  const audiences = typeof aud === 'string' ? [aud] : aud
-  const scopes = tokenScopes(claims)
-  if (!audiences?.includes(MCP_URL)) {
-    throw new McpConsentRequired('Clerk issued a device token without the Okou MCP audience.')
+  // Clerk can issue device grants without aud. An explicit audience must cover the API receiving the token.
+  if (aud !== undefined) {
+    const audiences = Array.isArray(aud) ? aud : [aud]
+    if (!audiences.every(value => typeof value === 'string') || !audiences.includes(MCP_URL)) {
+      throw new McpConsentRequired('Clerk issued a device token for a different resource than Okou MCP.')
+    }
   }
+  const scopes = tokenScopes(claims)
   const missing = CHAT_SCOPES.filter(permission => !scopes.includes(permission))
   if (missing.length) {
     throw new McpConsentRequired('Clerk issued a device token without ' + missing.join(', ') + '.')

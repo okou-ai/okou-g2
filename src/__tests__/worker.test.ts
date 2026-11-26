@@ -80,7 +80,7 @@ describe('device OAuth endpoints', () => {
     const grants = post.mock.calls.map(([, init]) => Object.fromEntries(init.body as URLSearchParams))
     expect(grants).toEqual([
       { client_id: 'fixture', resource: MCP_URL, grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'original-device-code' },
-      { client_id: 'fixture', resource: MCP_URL, grant_type: 'refresh_token', refresh_token: 'first-refresh' },
+      { client_id: 'fixture', grant_type: 'refresh_token', refresh_token: 'first-refresh' },
       { client_id: 'fixture', resource: MCP_URL, grant_type: 'urn:ietf:params:oauth:grant-type:device_code', device_code: 'another-code' },
     ])
   })
