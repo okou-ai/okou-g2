@@ -43,8 +43,12 @@ export function parseSession(body: Record<string, unknown>, clientId: string): D
   }
   const audiences = typeof aud === 'string' ? [aud] : aud
   const scopes = tokenScopes(claims)
-  if (!audiences?.includes(MCP_URL) || !CHAT_SCOPES.every(permission => scopes.includes(permission))) {
-    throw new McpConsentRequired(MCP_GRANT_PROMPT)
+  if (!audiences?.includes(MCP_URL)) {
+    throw new McpConsentRequired('Clerk issued a device token without the Okou MCP audience.')
+  }
+  const missing = CHAT_SCOPES.filter(permission => !scopes.includes(permission))
+  if (missing.length) {
+    throw new McpConsentRequired('Clerk issued a device token without ' + missing.join(', ') + '.')
   }
   return { accessToken: body.access_token, userId: sub, orgId: org_id, expiresAt: exp * 1000 }
 }

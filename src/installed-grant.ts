@@ -6,7 +6,7 @@ import { connectBridge } from './glasses'
 import { clearGrant, installation, readGrant, sessionHandle, writeGrant, type Grant, type InstallStorage } from './install-storage'
 
 export class AuthError extends Error {
-  constructor(readonly code: string, readonly status: number) { super(code) }
+  constructor(readonly code: string, readonly status: number, message = code) { super(message) }
 }
 
 interface SavedGrant extends Grant { handle?: string }
@@ -141,7 +141,11 @@ export class InstalledGrant {
     const body = await response.json() as Record<string, unknown>
     let session: DeviceSession
     try { session = parseSession(body, DEVICE_CLIENT_ID) }
-    catch (error) { throw new AuthError(error instanceof McpConsentRequired ? 'mcp_grant_required' : 'workspace_grant_required', 401) }
+    catch (error) {
+      if (!(error instanceof McpConsentRequired)) throw new AuthError('workspace_grant_required', 401)
+      if (previous) throw new AuthError('mcp_grant_required', 401)
+      throw new AuthError('mcp_grant_incomplete', 401, error.message)
+    }
     const token = body.refresh_token ?? previous?.refreshToken
     if (typeof token !== 'string' || !token) throw new AuthError('offline_grant_required', 401)
     const persisted = await this.save({ refreshToken: token, deviceHash: hash }, storage, expectedHandle, previous)

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { version } from '../app.json'
 import { DeviceAuth } from './auth'
 import { connectBridge, describeConnection, initialGlassesState, onDeviceStatus } from './glasses'
 import { LensController, type LensView } from './lens/controller'
@@ -80,7 +81,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
 
   const lastReply = messages.findLast((m) => m.role === 'assistant')
   return <main>
-    <header><h1>Okou for Even G2</h1><p className="hint">{describeConnection(glasses)}</p></header>
+    <header><h1>Okou for Even G2</h1><p className="hint">Beta {version} · {describeConnection(glasses)}</p></header>
     {login.phase === 'loading' && <section className="card" role="status">Opening Okou…</section>}
     {login.phase === 'signed-out' && <section className="card">
       <h2>Connect your glasses</h2>

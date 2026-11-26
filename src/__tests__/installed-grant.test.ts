@@ -31,17 +31,24 @@ it('starts at the issuer from a static package and distinguishes pending approva
 })
 
 it('restores chat with an existing MCP grant and requests consent if its audience is incompatible', async () => {
-  const response = (aud: string) => {
+  const response = (aud: string, scopes = CHAT_SCOPES) => {
     const jwt = new UnsecuredJWT({ aud, sub: 'user_fixture', org_id: 'org_fixture',
-      client_id: DEVICE_CLIENT_ID, scp: CHAT_SCOPES }).setExpirationTime('1h').encode()
+      client_id: DEVICE_CLIENT_ID, scp: scopes }).setExpirationTime('1h').encode()
     return Response.json({ access_token: jwt, token_type: 'Bearer', refresh_token: 'rotating-fixture' })
   }
   const fetch = vi.fn().mockResolvedValueOnce(grant('first-fixture'))
     .mockResolvedValueOnce(response(MCP_URL)).mockResolvedValueOnce(response('https://other.example'))
+    .mockResolvedValueOnce(response('https://other.example')).mockResolvedValueOnce(response(MCP_URL, ['user:org:read', 'okou:chat:read']))
   vi.stubGlobal('fetch', fetch)
   await new InstalledGrant().token('fixture')
   expect(await new InstalledGrant().refresh()).toMatchObject({ userId: 'user_fixture' })
   await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'mcp_grant_required', status: 401 })
+  await expect(new InstalledGrant().token('new-code')).rejects.toMatchObject({
+    code: 'mcp_grant_incomplete', message: expect.stringContaining('MCP audience'),
+  })
+  await expect(new InstalledGrant().token('another-code')).rejects.toMatchObject({
+    code: 'mcp_grant_incomplete', message: expect.stringContaining('okou:chat:send'),
+  })
 })
 
 it('restores a sealed rotating grant after a reload and revokes the latest credential on sign-out', async () => {
