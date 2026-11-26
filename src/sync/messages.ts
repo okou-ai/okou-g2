@@ -78,9 +78,11 @@ export async function readHistory(
           await readArchive(archive, append)
           verify(snapshot)
         } else {
-          // The implicit first page starts after the snapshot. Re-request from zero
-          // when the signed archive can't be read instead of skipping its history.
-          tail = await messages(client, thread, START)
+          // Compacted threads reject a zero cursor. Renew a possibly stale
+          // signed URL once, then surface the actual download failure.
+          if (attempt === 0) continue
+          const detail = archive ? 'HTTP ' + archive.status : 'network or cross-origin access'
+          throw new Error('Could not download the chat history snapshot (' + detail + ')')
         }
       }
       for (;;) {
@@ -95,7 +97,8 @@ export async function readHistory(
         tail = await messages(client, thread, cursor)
       }
     } catch (error) {
-      if (!(attempt === 0 && error instanceof ApiError && error.status === null && error.code === 'CHAT_EVENTS_EXPIRED')) throw error
+      const expired = error instanceof ApiError && (error.status === 410 || error.code === 'CHAT_EVENTS_EXPIRED')
+      if (attempt !== 0 || !expired) throw error
     }
   }
   throw new Error('Chat history cursor expired')

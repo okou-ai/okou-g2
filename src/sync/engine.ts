@@ -2,6 +2,7 @@ import { ApiError, OkouApiClient, type TokenProvider } from '../api/client'
 import { requireCancellationGrant } from '../device-protocol'
 import { DeviceStore, type Pending } from '../store'
 import type { ChatEventRow, Identity } from '../types'
+import type { RecordedVoice } from '../lens/recording'
 import { currentTask, type TaskTarget } from '../lens/messages'
 import { readHistory, type History } from './messages'
 
@@ -29,6 +30,7 @@ export class DeviceChat {
   private refreshing: Promise<void> | null = null
   private dirty = false
   private sending = false
+  private readonly uploaded = new WeakMap<RecordedVoice, string[]>()
 
   constructor(private readonly identity: Identity, getToken: TokenProvider,
       private readonly onChange: (state: ChatState) => void) {
@@ -115,12 +117,12 @@ export class DeviceChat {
   }
 
   private async submit(thread: string, pending: Pending, token: string, firstAttempt: boolean): Promise<'sent' | 'pending'> {
-    const { fileId, clientEventId } = pending
+    const { fileIds, clientEventId } = pending
     this.publish({ pending: true })
     try {
       const reply = await this.api.call<{ threadId: string; eventId: string }>('send_chat_message', {
         threadId: thread, clientEventId,
-        userMessage: { version: 1, parts: [{ type: 'voice', clips: [{ fileId }] }] },
+        userMessage: { version: 1, parts: fileIds.map(fileId => ({ type: 'voice', clips: [{ fileId }] })) },
       }, token)
       if (reply.threadId !== thread || reply.eventId !== clientEventId) return 'pending'
     } catch (error) {
@@ -150,16 +152,26 @@ export class DeviceChat {
     }
   }
 
-  async sendVoice(thread: string, audio: Blob): Promise<'sent' | 'pending'> {
+  async sendVoice(thread: string, audio: RecordedVoice): Promise<'sent' | 'pending'> {
     this.assertTarget(thread)
     if (this.sending) throw new Error('Another recording is being sent')
     this.sending = true
     try {
-      if (await this.store.pending(thread)) return 'pending'
-      const fileId = await this.api.upload(audio)
+      if (await this.store.pending(thread)) throw new Error('The previous send is awaiting confirmation')
+      const fileCount = audio.fileCount
+      if (!fileCount) throw new Error('No audio captured')
+      const fileIds = this.uploaded.get(audio) ?? []
+      this.uploaded.set(audio, fileIds)
+      // Keep each completed upload across an explicit retry. The ordered parts
+      // form one chat input even when a recording exceeds one transcription batch.
+      while (fileIds.length < fileCount) {
+        const wav = await audio.file(fileIds.length)
+        this.assertTarget(thread)
+        fileIds.push(await this.api.upload(wav))
+      }
       const token = await this.api.getToken()
       this.assertTarget(thread)
-      const pending = await this.store.reserveSend(thread, fileId)
+      const pending = await this.store.reserveSend(thread, fileIds)
       try { this.assertTarget(thread) } catch (error) {
         await this.store.acknowledge(thread, pending.clientEventId)
         throw error

@@ -3,6 +3,7 @@ import {
   OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent,
   type RebuildPageContainer, type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
+import type { RecordedVoice } from '../lens/recording'
 import { LensController, type LensView } from '../lens/controller'
 import type { LensMessage } from '../lens/messages'
 
@@ -33,7 +34,11 @@ async function setup(open = async () => true, stop = async () => true) {
     onEvenHubEvent: (cb: (e: EvenHubEvent) => void) => { listeners.add(cb); return () => { listeners.delete(cb) } },
     shutDownPageContainer: vi.fn(async () => true),
   }
-  const send = vi.fn(async (_thread: string, _audio: Blob) => 'sent' as const)
+  const sentWavs: Blob[] = []
+  const send = vi.fn(async (_thread: string, audio: RecordedVoice) => {
+    for (let index = 0; index < audio.fileCount; index++) sentWavs.push(await audio.file(index))
+    return 'sent' as const
+  })
   const cancel = vi.fn(async () => {})
   const error = vi.fn()
   const controller = new LensController(bridge as unknown as EvenAppBridge, send, vi.fn(), error, cancel)
@@ -50,7 +55,7 @@ async function setup(open = async () => true, stop = async () => true) {
   const box = (name: string) => page().textObject?.find(v => v.containerName === name)
   const options = () => page().listObject?.[0]?.itemContainer?.itemName
   await settle()
-  return { controller, bridge, send, cancel, error, update, tap, select, frame, page, box, options }
+  return { controller, bridge, send, sentWavs, cancel, error, update, tap, select, frame, page, box, options }
 }
 
 describe('glasses reader', () => {
@@ -196,7 +201,8 @@ describe('glasses microphone', () => {
       await g.select()
     } else await g.tap()
     expect(g.send).toHaveBeenCalledTimes(1)
-    const [thread, audio] = g.send.mock.calls[0]!
+    const [thread] = g.send.mock.calls[0]!
+    const [audio] = g.sentWavs
     expect(thread).toBe('bound')
     expect(audio.type).toBe('audio/wav')
     const bytes = new Uint8Array(await audio.arrayBuffer())
@@ -208,7 +214,7 @@ describe('glasses microphone', () => {
     expect(g.box('body')?.content).toBe('Answer')
   })
 
-  it('keeps incoming replies unread during recording, including after its 60-second cutoff, and discards on request', async () => {
+  it('keeps recording through phone suspension and past one minute, and discards on request', async () => {
     const g = await setup()
     await g.tap(); await g.tap(); await g.frame()
     await g.update({ messages: [reply(1, 'Arrived during recording')] })
@@ -216,8 +222,9 @@ describe('glasses microphone', () => {
     expect(g.box('title')?.yPosition).toBe(g.box('indicator')?.yPosition)
     expect(g.box('voice-status')?.yPosition).toBeGreaterThan(g.box('body')!.yPosition!)
     await g.tap(Gesture.LONG_PRESS_EVENT)
-    await vi.advanceTimersByTimeAsync(60_000)
-    expect(g.bridge.audioControl).toHaveBeenLastCalledWith(false)
+    g.controller.suspend()
+    await vi.advanceTimersByTimeAsync(65_000)
+    expect(g.bridge.audioControl).toHaveBeenCalledTimes(1)
     expect(g.options()).toEqual(['Send now', 'Discard message'])
     await g.select(1)
     expect(g.box('body')?.content).toBe('Arrived during recording')
@@ -226,18 +233,31 @@ describe('glasses microphone', () => {
     expect(g.send).not.toHaveBeenCalled()
   })
 
-  it('honors Send now while the microphone is still closing at the time limit', async () => {
-    let release!: () => void
-    const g = await setup(undefined, () => new Promise<boolean>(resolve => { release = () => resolve(true) }))
+  it('sends the beginning and end of a take across the old cutoff', async () => {
+    const g = await setup()
     await g.tap(); await g.tap(); await g.frame()
-    await g.tap(Gesture.LONG_PRESS_EVENT)
-    await vi.advanceTimersByTimeAsync(60_000)
-    await g.select()
-    expect(g.send).not.toHaveBeenCalled()
-    release()
-    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(61_000)
+    await g.frame(); await g.tap()
     expect(g.send).toHaveBeenCalledTimes(1)
-    expect(g.box('body')?.content).toBe('Thinking...')
+    expect([...new Uint8Array(await g.sentWavs[0].arrayBuffer()).slice(44)]).toEqual([1, 0, 2, 0, 1, 0, 2, 0])
+  })
+
+  it('keeps the whole recording available to an explicit send while the lens exits', async () => {
+    const g = await setup()
+    let resume!: () => void
+    const paused = new Promise<void>(resolve => { resume = resolve })
+    const delivered: Blob[] = []
+    g.send.mockImplementationOnce(async (_thread, audio) => {
+      await paused
+      delivered.push(await audio.file(0))
+      return 'sent'
+    })
+    await g.tap(); await g.tap(); await g.frame(); await g.tap()
+    await g.tap(Gesture.SYSTEM_EXIT_EVENT)
+    resume()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(delivered.map(wav => wav.size)).toEqual([48])
+    expect(g.send).toHaveBeenCalledTimes(1)
   })
 
   it('closes an opening microphone when the workspace changes and discards on double-tap', async () => {

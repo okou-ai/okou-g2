@@ -1,10 +1,5 @@
-/** Capture bounded 16 kHz mono PCM from the G2 microphone. */
 import { AudioInputSource, type EvenAppBridge } from '@evenrealities/even_hub_sdk'
-
-import { AUDIO_SAMPLE_RATE, MAX_RECORDING_SECONDS } from '../config'
-
-const BYTES_PER_SAMPLE = 2
-const MAX_BYTES = AUDIO_SAMPLE_RATE * BYTES_PER_SAMPLE * MAX_RECORDING_SECONDS
+import { PCM_SEGMENT_BYTES, RecordedVoice } from './recording'
 
 /** Normalize the several shapes a host may use for the PCM payload. */
 function toBytes(pcm: unknown): Uint8Array | null {
@@ -21,99 +16,59 @@ function toBytes(pcm: unknown): Uint8Array | null {
   return null
 }
 
-/** Wrap raw PCM in a RIFF header so the endpoint sees a `audio/wav` file. */
-export function pcmToWav(pcm: Uint8Array, sampleRate = AUDIO_SAMPLE_RATE): Blob {
-  const header = new ArrayBuffer(44)
-  const view = new DataView(header)
-  const channels = 1
-  const bitsPerSample = 16
-  const byteRate = (sampleRate * channels * bitsPerSample) / 8
-  const blockAlign = (channels * bitsPerSample) / 8
-
-  const ascii = (offset: number, text: string) => {
-    for (let index = 0; index < text.length; index += 1) {
-      view.setUint8(offset + index, text.charCodeAt(index))
-    }
-  }
-
-  ascii(0, 'RIFF')
-  view.setUint32(4, 36 + pcm.byteLength, true)
-  ascii(8, 'WAVE')
-  ascii(12, 'fmt ')
-  view.setUint32(16, 16, true) // PCM subchunk size
-  view.setUint16(20, 1, true) // format: PCM
-  view.setUint16(22, channels, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, byteRate, true)
-  view.setUint16(32, blockAlign, true)
-  view.setUint16(34, bitsPerSample, true)
-  ascii(36, 'data')
-  view.setUint32(40, pcm.byteLength, true)
-
-  return new Blob([header, pcm as BlobPart], { type: 'audio/wav' })
-}
-
 export interface Recorder {
-  /** Resolves with the captured audio, or null when nothing was heard. */
-  stop(): Promise<Blob | null>
+  readonly recording: RecordedVoice
+  stop(): Promise<RecordedVoice | null>
   cancel(): Promise<void>
 }
 
-/**
- * Start capturing from the glasses microphone.
- *
- * `AudioInputSource.Glasses` requires the startup page to already exist, which
- * the controller guarantees before any screen is shown.
- */
-export async function startRecording(
-  bridge: EvenAppBridge,
-): Promise<Recorder> {
-  const chunks: Uint8Array[] = []
-  let total = 0
-  let stopped = false
-
-  const unsubscribe = bridge.onEvenHubEvent((event) => {
-    const audio = event.audioEvent
-    if (!audio || stopped) return
-    const bytes = toBytes((audio as { audioPcm?: unknown }).audioPcm)
-    if (!bytes || bytes.byteLength === 0) return
-    // Stop accumulating past the cap; the recorder still has to be stopped by
-    // the caller, but memory stays bounded.
-    if (total >= MAX_BYTES) return
-    const chunk = bytes.slice(0, MAX_BYTES - total)
-    chunks.push(chunk)
-    total += chunk.byteLength
+export async function startRecording(bridge: EvenAppBridge, onStorageFailure: () => void): Promise<Recorder> {
+  const recording = new RecordedVoice()
+  let buffer = new Uint8Array(PCM_SEGMENT_BYTES)
+  let used = 0
+  const unsubscribe = bridge.onEvenHubEvent(event => {
+    const bytes = toBytes(event.audioEvent?.audioPcm)
+    if (!bytes) return
+    for (let offset = 0; offset < bytes.length;) {
+      const count = Math.min(buffer.length - used, bytes.length - offset)
+      buffer.set(bytes.subarray(offset, offset + count), used)
+      used += count
+      offset += count
+      if (used === buffer.length) {
+        recording.saveSegment(buffer.buffer, onStorageFailure)
+        buffer = new Uint8Array(PCM_SEGMENT_BYTES)
+        used = 0
+      }
+    }
   })
-
   try {
     if (!await bridge.audioControl(true, AudioInputSource.Glasses)) throw new Error('The glasses microphone did not start')
   } catch (error) {
     unsubscribe()
+    await recording.discard()
     throw error
   }
 
-  const teardown = async () => {
-    if (stopped) return
-    stopped = true
+  const closeMic = async () => {
     unsubscribe()
     if (!await bridge.audioControl(false)) throw new Error('Could not close the microphone')
   }
-
   return {
+    recording,
     async stop() {
-      await teardown()
-      if (total < BYTES_PER_SAMPLE) return null
-      const merged = new Uint8Array(total)
-      let offset = 0
-      for (const chunk of chunks) {
-        merged.set(chunk, offset)
-        offset += chunk.byteLength
+      try {
+        await closeMic()
+        await recording.finish(buffer.buffer.slice(0, used - used % 2))
+        if (recording.fileCount) return recording
+      } catch (error) {
+        await recording.discard()
+        throw error
       }
-      return pcmToWav(merged.subarray(0, total - total % BYTES_PER_SAMPLE))
+      return null
     },
     async cancel() {
-      await teardown()
-      chunks.length = 0
+      try { await closeMic() }
+      finally { await recording.discard() }
     },
   }
 }

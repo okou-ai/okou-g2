@@ -8,8 +8,9 @@ import type { OkouApiClient } from './api/client'
 type Binding = { id: string; ready: boolean }
 export interface Pending {
   clientEventId: string
-  fileId: string
+  fileIds: string[]
 }
+type StoredPending = Pending | { clientEventId: string; fileId: string }
 const database = createStore('okou-g2-device', 'chat')
 
 export class DeviceStore {
@@ -56,12 +57,15 @@ export class DeviceStore {
 
   private pendingKey(id: string) { return [this.key, id, 'pending'] }
 
-  pending(id: string) { return get<Pending>(this.pendingKey(id), database) }
+  async pending(id: string): Promise<Pending | undefined> {
+    const saved = await get<StoredPending>(this.pendingKey(id), database)
+    if (!saved) return
+    return 'fileIds' in saved ? saved : { clientEventId: saved.clientEventId, fileIds: [saved.fileId] }
+  }
 
-  async reserveSend(thread: string, fileId: string): Promise<Pending> {
-    // Older reservations also contain REST-only fields. The stable send and file IDs work on MCP.
-    const pending = { clientEventId: crypto.randomUUID(), fileId }
-    await update<Pending>(this.pendingKey(thread), (current) => {
+  async reserveSend(thread: string, fileIds: string[]): Promise<Pending> {
+    const pending = { clientEventId: crypto.randomUUID(), fileIds }
+    await update<StoredPending>(this.pendingKey(thread), (current) => {
       if (current) throw new Error('The previous send is awaiting confirmation')
       return pending
     }, database)
@@ -70,7 +74,7 @@ export class DeviceStore {
 
   async acknowledge(id: string, eventId: string) {
     // A delayed response must not clear a newer send's reservation.
-    await update<Pending | null>(this.pendingKey(id),
+    await update<StoredPending | null>(this.pendingKey(id),
       (current) => current?.clientEventId === eventId ? null : current ?? null, database)
   }
 }

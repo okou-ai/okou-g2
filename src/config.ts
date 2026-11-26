@@ -6,5 +6,4 @@ export const CHAT_SCOPES = ['user:org:read', 'okou:chat:read', 'okou:chat:send']
 export const CANCEL_SCOPE = 'okou:run:cancel'
 export const DEVICE_SCOPE = ['openid', 'profile', 'offline_access', ...CHAT_SCOPES, CANCEL_SCOPE].join(' ')
 export const AUDIO_SAMPLE_RATE = 16_000
-export const MAX_RECORDING_SECONDS = 60
-export const MAX_WAV_BYTES = 44 + AUDIO_SAMPLE_RATE * 2 * MAX_RECORDING_SECONDS
+export const MAX_WAV_BYTES = 25 * 1024 * 1024

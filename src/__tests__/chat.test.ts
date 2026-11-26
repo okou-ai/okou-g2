@@ -1,10 +1,14 @@
 import 'fake-indexeddb/auto'
+import { createStore, set } from 'idb-keyval'
 import { UnsecuredJWT } from 'jose'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OkouApiClient } from '../api/client'
-import { CHAT_SCOPES, DEVICE_SCOPE, MCP_URL } from '../config'
+import { API_BASE_URL, CHAT_SCOPES, DEVICE_SCOPE, MCP_URL } from '../config'
 import { DeviceStore } from '../store'
 import { DeviceChat, initialChat, type ChatState } from '../sync/engine'
+import { startRecording } from '../lens/audio'
+import type { EvenAppBridge, EvenHubEvent } from '@evenrealities/even_hub_sdk'
+import { RecordedVoice, PCM_SEGMENT_BYTES } from '../lens/recording'
 import { readHistory } from '../sync/messages'
 import { watchThread } from '../sync/realtime'
 import type { ChatEventRow } from '../types'
@@ -112,16 +116,28 @@ describe('single-thread reader', () => {
     expect(await readHistory(api(), id, null, pending)).toMatchObject({ rows: [a, b], acknowledged: true })
   })
 
-  it('reads from zero when the signed archive is unavailable', async () => {
+  it('renews an unavailable signed archive and keeps the snapshot cursor when history was compacted', async () => {
     const id = crypto.randomUUID(), history = row(id, 1), signed = 'https://storage.example/archive'
+    let pointers = 0
     vi.stubGlobal('fetch', async (url: string | URL, init: RequestInit) => {
-      if (String(url) === signed) return new Response(null, { status: 403 })
+      if (String(url) === signed + '1') throw new TypeError('Failed to fetch')
+      if (String(url) === signed + '2') return new Response(JSON.stringify(history) + '\n')
       const call = tool(String(url), init)
-      if (call.arguments.sinceSeqId === undefined) return page(init, [], history, false, { url: signed, lastEventId: history.id, lastSeqId: 1 })
-      expect(call.arguments.sinceSeqId).toBe(0)
-      return page(init, [history])
+      expect(call.arguments.sinceSeqId).toBeUndefined()
+      return page(init, [], history, false, { url: signed + ++pointers, lastEventId: history.id, lastSeqId: 1 })
     })
     expect((await readHistory(api(), id, null)).rows).toEqual([history])
+    expect(pointers).toBe(2)
+  })
+
+  it('reports a persistently blocked archive without skipping rows or reopening from zero', async () => {
+    const id = crypto.randomUUID(), history = row(id, 1), signed = 'https://storage.example/blocked'
+    vi.stubGlobal('fetch', async (url: string | URL, init: RequestInit) => {
+      if (String(url) === signed) throw new TypeError('Failed to fetch')
+      expect(tool(String(url), init).arguments.sinceSeqId).toBeUndefined()
+      return page(init, [], history, false, { url: signed, lastEventId: history.id, lastSeqId: 1 })
+    })
+    await expect(readHistory(api(), id, null)).rejects.toThrow('chat history snapshot (network or cross-origin access)')
   })
 
   it('rebuilds an expired cursor and rejects a row belonging to another thread', async () => {
@@ -178,6 +194,84 @@ describe('cancel current task', () => {
 })
 
 describe('voice delivery', () => {
+  it('spools a continuous 14-minute take, retries only the unfinished WAV and sends one ordered input', async () => {
+    const owner = identity(), files: string[] = [crypto.randomUUID(), crypto.randomUUID()]
+    const storage = 'https://user-artifact-private-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com/'
+    const actions: string[] = [], uploads: number[] = []
+    let thread = '', failSecond = true
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      if (url.startsWith(storage)) {
+        const file = files.indexOf(url.slice(storage.length))
+        uploads.push(file)
+        if (file === 1 && failSecond) { failSecond = false; return new Response(null, { status: 503 }) }
+        const data = new Uint8Array(await (init.body as Blob).arrayBuffer())
+        expect(new DataView(data.buffer).getUint32(40, true)).toBe(data.length - 44)
+        const segments = file === 0 ? 54 : 2
+        expect(data.length).toBe(44 + PCM_SEGMENT_BYTES * segments + (file === 1 ? 2 : 0))
+        for (let i = 0; i < segments; i++) {
+          const value = i + (file === 0 ? 0 : 54)
+          const chunk = data.subarray(44 + i * PCM_SEGMENT_BYTES, 44 + (i + 1) * PCM_SEGMENT_BYTES)
+          expect(chunk.every(byte => byte === value)).toBe(true)
+        }
+        if (file === 1) expect([...data.slice(-2)]).toEqual([213, 47])
+        return new Response(null, { status: 200 })
+      }
+      const { name, arguments: args } = tool(url, init)
+      if (name === 'create_chat_thread') { thread = String(args.clientThreadId); return toolResult(init, { threadId: thread }) }
+      if (name === 'get_chat_messages') return page(init, [])
+      actions.push(name)
+      if (name === 'prepare_voice_upload') {
+        const file = files[Number(args.size) > PCM_SEGMENT_BYTES * 3 ? 0 : 1]
+        return toolResult(init, { id: file, uploadUrl: storage + file })
+      }
+      if (name === 'complete_voice_upload') return toolResult(init, { id: args.id })
+      expect(name).toBe('send_chat_message')
+      expect(args.userMessage).toEqual({ version: 1, parts: files.map(fileId => ({ type: 'voice', clips: [{ fileId }] })) })
+      return toolResult(init, { threadId: thread, eventId: args.clientEventId })
+    })
+    let listener!: (event: EvenHubEvent) => void
+    const bridge = { audioControl: vi.fn(async () => true), onEvenHubEvent: (handler: typeof listener) => {
+      listener = handler
+      return () => {}
+    } } as unknown as EvenAppBridge
+    const storageError = vi.fn()
+    const chat = new DeviceChat(owner, async () => 'fixture', () => {})
+    await chat.start()
+    const recorder = await startRecording(bridge, storageError)
+    const feed = (bytes: Uint8Array) => listener({ audioEvent: { audioPcm: bytes } } as EvenHubEvent)
+    try {
+      // One host frame crosses each 15-second boundary, including a split PCM sample.
+      let carry = new Uint8Array()
+      for (let i = 0; i < 56; i++) {
+        const data = new Uint8Array(PCM_SEGMENT_BYTES).fill(i)
+        const frame = new Uint8Array(carry.length + data.length - 1)
+        frame.set(carry); frame.set(data.subarray(0, -1), carry.length)
+        feed(frame)
+        carry = data.slice(-1)
+      }
+      feed(new Uint8Array([carry[0], 213, 47]))
+      const draft = (await recorder.stop())!
+      expect(storageError).not.toHaveBeenCalled()
+      expect(draft.fileCount).toBe(2)
+      expect(actions).toHaveLength(0)
+      await expect(chat.sendVoice(thread, draft)).rejects.toThrow('503')
+      await expect(chat.sendVoice(thread, draft)).resolves.toBe('sent')
+      expect(uploads).toEqual([0, 1, 1])
+      expect(actions.filter(action => action === 'send_chat_message')).toHaveLength(1)
+    } finally { await recorder.recording.discard(); chat.close() }
+  })
+
+  it('restores the original file and event IDs of a pending send saved before segmented capture', async () => {
+    const owner = identity(), thread = crypto.randomUUID()
+    const receipt = { clientEventId: crypto.randomUUID(), fileId: crypto.randomUUID() }
+    const account = JSON.stringify([API_BASE_URL, owner.userId, owner.orgId])
+    await set([account, thread, 'pending'], receipt, createStore('okou-g2-device', 'chat'))
+    const store = new DeviceStore(owner)
+    expect(await store.pending(thread)).toEqual({ clientEventId: receipt.clientEventId, fileIds: [receipt.fileId] })
+    await store.acknowledge(thread, receipt.clientEventId)
+    expect(await store.pending(thread)).toBeUndefined()
+  })
+
   it('retries the exact send after a lost response and reconciles the promoted input on reopening', async () => {
     const owner = identity(), file = crypto.randomUUID()
     const uploadUrl = 'https://user-artifact-private-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com/clip'
@@ -215,7 +309,8 @@ describe('voice delivery', () => {
     let chat = open()
     try {
       await chat.start()
-      const wav = new Blob([new Uint8Array(48)], { type: 'audio/wav' })
+      const wav = new RecordedVoice()
+      await wav.finish(new ArrayBuffer(4))
       await expect(chat.sendVoice(thread, wav)).resolves.toBe('pending')
       await chat.refresh(); chat.close(); chat = open(); await chat.start()
       expect(state.pending).toBe(true)

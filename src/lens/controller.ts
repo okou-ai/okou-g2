@@ -1,5 +1,5 @@
 import { OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
-import { MAX_RECORDING_SECONDS } from '../config'
+import type { RecordedVoice } from './recording'
 import { startRecording, type Recorder } from './audio'
 import type { LensMessage, TaskTarget } from './messages'
 import { indicatorUpdate, startupPage, lensPage, menuItems, paginate, type LensPage, type Menu } from './screens'
@@ -14,7 +14,7 @@ export interface LensView {
 }
 
 type Stage = 'quiet' | 'reader' | 'starting' | 'recording' | 'stopping' | 'review' | 'sending'
-type Voice = (target: string, audio: Blob) => Promise<'sent' | 'pending'>
+type Voice = (target: string, audio: RecordedVoice) => Promise<'sent' | 'pending'>
 
 const IDLE_MS = 30_000
 const PULSE_MS = 300
@@ -31,9 +31,8 @@ export class LensController {
   private sentAfter: number | null = null
   private note = ''
   private recorder: Recorder | null = null
-  private clip: Blob | null = null
+  private clip: RecordedVoice | null = null
   private revision = 0
-  private micTimer?: ReturnType<typeof setTimeout>
   private idleTimer?: ReturnType<typeof setTimeout>
   private pulseTimer?: ReturnType<typeof setTimeout>
   private pulseStep = 0
@@ -71,14 +70,16 @@ export class LensController {
     if (changedThread || latest?.id !== previous?.id || latest?.text !== previous?.text) {
       this.pageIndex = 0
       this.pages = latest?.role === 'assistant' ? paginate(latest.text) : ['']
-      this.note = ''
+      if (this.stage === 'reader') this.note = ''
       if (latest && this.sentAfter !== null && latest.seqId > this.sentAfter) this.sentAfter = null
     }
     this.draw()
   }
 
   suspend() {
-    if (this.stage !== 'sending') this.reset('quiet')
+    // The phone can lock while the glasses are still in use. Actual lens exit,
+    // sign-out and workspace changes still close the microphone.
+    if (this.stage === 'reader') this.reset('quiet')
   }
 
   close() {
@@ -88,13 +89,17 @@ export class LensController {
     this.reset('quiet')
   }
 
+  private discard(clip: RecordedVoice | null) {
+    if (clip) void clip.discard().catch(() => this.onError('Could not clear the recording from local storage'))
+  }
+
   private reset(next: 'quiet' | 'reader') {
     this.revision++
-    clearTimeout(this.micTimer)
     if (this.recorder) {
       this.micCleanup = this.recorder.cancel().catch(() => this.onError('Could not close the microphone'))
     }
     this.recorder = null
+    this.discard(this.clip)
     this.clip = null
     this.menu = null
     this.stage = next
@@ -198,7 +203,7 @@ export class LensController {
       }
       case 'send': {
         if (this.stage !== 'stopping') { void this.tap(); break }
-        // The time limit may have closed the mic while the menu was open.
+        // Local storage may have filled while the menu was open.
         const version = this.revision
         void this.micCleanup.then(() => { if (version === this.revision) void this.sendClip() })
         break
@@ -222,11 +227,14 @@ export class LensController {
     // that microphone before a new capture is allowed to open it again.
     this.micCleanup = this.micCleanup.then(async () => {
       if (version !== this.revision) return
-      const recorder = await startRecording(this.bridge)
+      const onStorageFailure = () => {
+        if (version === this.revision) void this.finishRecording(false)
+      }
+      const recorder = await startRecording(this.bridge, onStorageFailure)
       if (version !== this.revision) { await recorder.cancel(); return }
       this.recorder = recorder
       this.stage = 'recording'
-      this.micTimer = setTimeout(() => void this.finishRecording(false), MAX_RECORDING_SECONDS * 1000)
+      if (recorder.recording.storageFailed) onStorageFailure()
     }).catch(() => {
       if (version === this.revision) {
         this.onError('Microphone unavailable')
@@ -242,19 +250,20 @@ export class LensController {
     if (!recorder || this.stage !== 'recording') return
     const version = this.revision
     this.recorder = null
-    clearTimeout(this.micTimer)
     this.stage = 'stopping'
     this.draw()
     try {
       const stopped = recorder.stop()
       this.micCleanup = stopped.then(() => undefined, () => undefined)
       const audio = await stopped
-      if (version !== this.revision) return
+      if (version !== this.revision) { await audio?.discard(); return }
       if (!audio) { this.showReader('No audio captured') }
       else {
         this.clip = audio
         this.stage = 'review'
         if (send) return this.sendClip()
+        this.note = 'Storage unavailable · tap to send'
+        this.onError('Recording stopped because local storage is unavailable. Tap to send the captured audio.')
       }
     } catch {
       if (version === this.revision) { this.showReader('Recording failed') }
@@ -265,20 +274,24 @@ export class LensController {
   private async sendClip() {
     if (!this.clip || !this.view.thread || this.stage !== 'review') return
     const version = this.revision
+    const clip = this.clip
+    this.clip = null // The send owns the staged PCM until all WAVs have uploaded.
     const lastSeqId = this.view.messages.at(-1)?.seqId ?? 0
     this.stage = 'sending'
     this.draw()
     try {
-      const result = await this.send(this.view.thread, this.clip)
+      const result = await this.send(this.view.thread, clip)
       if (version !== this.revision) return
-      this.clip = null
       if (result === 'sent' && (this.view.messages.at(-1)?.seqId ?? 0) <= lastSeqId) this.sentAfter = lastSeqId
       this.showReader(result === 'pending' ? 'Checking delivery…' : '')
     } catch (error) {
       if (version !== this.revision) return
+      this.clip = clip
       this.onError(error instanceof Error ? error.message : 'Send failed')
       this.note = 'Send failed'
       this.stage = 'review'
+    } finally {
+      if (this.clip !== clip) this.discard(clip)
     }
     this.draw()
   }
