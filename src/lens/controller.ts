@@ -2,7 +2,7 @@ import { OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent } fro
 import type { RecordedVoice } from './recording'
 import { startRecording, type Recorder } from './audio'
 import type { LensMessage, TaskTarget } from './messages'
-import { indicatorUpdate, startupPage, lensPage, menuItems, paginate, type LensPage, type Menu } from './screens'
+import { indicatorUpdate, listeningLabel, listeningUpdate, startupPage, lensPage, menuItems, paginate, type LensPage, type Menu } from './screens'
 
 export interface LensView {
   thread: string | null
@@ -40,6 +40,7 @@ export class LensController {
   private renderQueue = Promise.resolve()
   private lastPage = ''
   private lastDotLevel = 0
+  private lastListening = ''
   private active = true
   private closed = false
   private micCleanup: Promise<void> = Promise.resolve()
@@ -230,7 +231,9 @@ export class LensController {
       const onStorageFailure = () => {
         if (version === this.revision) void this.finishRecording(false)
       }
-      const recorder = await startRecording(this.bridge, onStorageFailure)
+      const recorder = await startRecording(this.bridge, onStorageFailure, () => {
+        if (this.stage === 'recording' && !this.menu) this.draw()
+      })
       if (version !== this.revision) { await recorder.cancel(); return }
       this.recorder = recorder
       this.stage = 'recording'
@@ -302,8 +305,8 @@ export class LensController {
     const lastReply = this.view.messages.findLast(message => message.role === 'assistant')
     const working = this.view.task !== null || this.sentAfter !== null
     const unread = (lastReply?.seqId ?? 0) > this.readSeq
-    const indicator = working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
-    let body = '', footer = ''
+    const indicator = this.stage === 'recording' && !this.menu ? 'listening' : working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
+    let body = '', listening = ''
     switch (this.stage) {
       case 'quiet': break
       case 'reader':
@@ -311,12 +314,12 @@ export class LensController {
         else body = latest ? this.pages[this.pageIndex] : this.note || this.view.status
         break
       case 'starting': body = 'Opening microphone…'; break
-      case 'recording': footer = 'Listening...'; break
+      case 'recording': if (!this.menu) listening = listeningLabel(this.recorder!.seconds); break
       case 'stopping': body = 'Finishing recording…'; break
       case 'review': body = this.note || 'Recording ready'; break
       case 'sending': body = 'Sending…'; break
     }
-    return { mode, menu: this.menu?.kind ?? null, body, footer, indicator }
+    return { mode, menu: this.menu?.kind ?? null, body, listening, indicator }
   }
 
   private draw() {
@@ -324,8 +327,8 @@ export class LensController {
     this.renderQueue = this.renderQueue.then(async () => {
       if (this.closed || !this.active) return
       const page = this.page()
-      const key = page.menu ?? JSON.stringify([page.mode, page.body, page.footer])
-      const pulse = page.indicator === 'working'
+      const key = page.menu ?? JSON.stringify([page.mode, page.body, !!page.listening])
+      const pulse = page.indicator === 'working' || page.indicator === 'listening'
       if (!pulse) {
         clearTimeout(this.pulseTimer)
         this.pulseTimer = undefined
@@ -336,9 +339,12 @@ export class LensController {
       if (key !== this.lastPage) {
         if (!await this.bridge.rebuildPageContainer(lensPage(page, level))) throw new Error('Could not update the G2 display')
         this.lastPage = key
+      } else if (page.listening && (this.lastListening !== page.listening || level !== this.lastDotLevel)) {
+        if (!await this.bridge.textContainerUpgrade(listeningUpdate(page.listening, level))) throw new Error('Could not update the G2 recording status')
       } else if (level !== this.lastDotLevel) {
         if (!await this.bridge.textContainerUpgrade(indicatorUpdate(level))) throw new Error('Could not update the G2 indicator')
       }
+      this.lastListening = page.listening
       this.lastDotLevel = level
       if (this.closed || !this.active) return
       if (page.mode === 'reader' && !page.menu && this.stage === 'reader' && !this.menu &&
@@ -353,7 +359,7 @@ export class LensController {
           this.pulseTimer = undefined
           this.pulseStep = (this.pulseStep + 1) % PULSE_LEVELS.length
           this.draw()
-        }, PULSE_MS)
+        }, page.listening ? 700 : PULSE_MS)
       }
     }).catch((error: Error) => {
       this.lastPage = ''

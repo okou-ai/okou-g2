@@ -4,6 +4,7 @@ import {
   type RebuildPageContainer, type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import type { RecordedVoice } from '../lens/recording'
+import { listeningLabel } from '../lens/screens'
 import { LensController, type LensView } from '../lens/controller'
 import type { LensMessage } from '../lens/messages'
 
@@ -55,7 +56,7 @@ async function setup(open = async () => true, stop = async () => true) {
   const box = (name: string) => page().textObject?.find(v => v.containerName === name)
   const options = () => page().listObject?.[0]?.itemContainer?.itemName
   await settle()
-  return { controller, bridge, send, sentWavs, cancel, error, update, tap, select, frame, page, box, options }
+  return { emit, controller, bridge, send, sentWavs, cancel, error, update, tap, select, frame, page, box, options }
 }
 
 describe('glasses reader', () => {
@@ -192,7 +193,7 @@ describe('glasses microphone', () => {
     await g.tap()
     expect(g.bridge.audioControl).not.toHaveBeenCalled()
     await g.tap()
-    expect(g.box('voice-status')?.content).toBe('Listening...')
+    expect(g.box('voice-status')?.content).toBe('· Listening 00:00')
     expect(g.box('body')?.content).toBe('')
     await g.frame(); await g.frame()
     if (action === 'menu') {
@@ -218,9 +219,8 @@ describe('glasses microphone', () => {
     const g = await setup()
     await g.tap(); await g.tap(); await g.frame()
     await g.update({ messages: [reply(1, 'Arrived during recording')] })
-    expect(g.box('indicator')?.content).toBeTruthy()
-    expect(g.box('title')?.yPosition).toBe(g.box('indicator')?.yPosition)
-    expect(g.box('voice-status')?.yPosition).toBeGreaterThan(g.box('body')!.yPosition!)
+    expect(g.box('voice-status')?.yPosition).toBe(g.box('title')?.yPosition)
+    expect(g.box('voice-status')?.xPosition).toBeGreaterThan(g.box('title')!.xPosition!)
     await g.tap(Gesture.LONG_PRESS_EVENT)
     g.controller.suspend()
     await vi.advanceTimersByTimeAsync(65_000)
@@ -231,6 +231,30 @@ describe('glasses microphone', () => {
     await g.tap(Gesture.DOUBLE_CLICK_EVENT)
     expect(g.box('indicator')?.content).toBe('')
     expect(g.send).not.toHaveBeenCalled()
+  })
+
+  it('updates the anchored listening clock from captured PCM without rebuilding the page', async () => {
+    const g = await setup()
+    await g.tap(); await g.tap()
+    await g.frame()
+    await g.tap(Gesture.DOUBLE_CLICK_EVENT)
+    await g.tap()
+    const start = g.box('voice-status')!
+    expect(start.content).toBe('· Listening 00:00')
+    const builds = g.bridge.rebuildPageContainer.mock.calls.length
+    const packet = (length: number) => g.emit({ audioEvent: { audioPcm: new Uint8Array(length) } } as EvenHubEvent)
+    await packet(31_999)
+    expect(start.content).toBe('· Listening 00:00')
+    await packet(1)
+    expect(start.content).toBe('· Listening 00:01')
+    await packet(58 * 32_000)
+    expect(start.content).toBe('· Listening 00:59')
+    await packet(32_000)
+    expect(start.content).toBe('· Listening 01:00')
+    expect(g.box('voice-status')).toBe(start)
+    expect(g.bridge.rebuildPageContainer).toHaveBeenCalledTimes(builds)
+    expect(listeningLabel(5999)).toBe('· Listening 99:59')
+    expect(listeningLabel(6000)).toBe('· Listening 100:00')
   })
 
   it('sends the beginning and end of a take across the old cutoff', async () => {
@@ -272,7 +296,7 @@ describe('glasses microphone', () => {
     await g.tap(); await g.tap()
     release()
     await g.frame()
-    expect(g.box('voice-status')?.content).toBe('Listening...')
+    expect(g.box('voice-status')?.content).toBe('· Listening 00:00')
     await g.tap(Gesture.DOUBLE_CLICK_EVENT)
     expect(g.box('title')?.content).toBe('Okou')
     expect(g.box('voice-status')).toBeUndefined()

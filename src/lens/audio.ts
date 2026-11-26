@@ -1,4 +1,5 @@
 import { AudioInputSource, type EvenAppBridge } from '@evenrealities/even_hub_sdk'
+import { AUDIO_SAMPLE_RATE } from '../config'
 import { PCM_SEGMENT_BYTES, RecordedVoice } from './recording'
 
 /** Normalize the several shapes a host may use for the PCM payload. */
@@ -18,14 +19,17 @@ function toBytes(pcm: unknown): Uint8Array | null {
 
 export interface Recorder {
   readonly recording: RecordedVoice
+  readonly seconds: number
   stop(): Promise<RecordedVoice | null>
   cancel(): Promise<void>
 }
 
-export async function startRecording(bridge: EvenAppBridge, onStorageFailure: () => void): Promise<Recorder> {
+export async function startRecording(bridge: EvenAppBridge, onStorageFailure: () => void, onSecond?: () => void): Promise<Recorder> {
   const recording = new RecordedVoice()
   let buffer = new Uint8Array(PCM_SEGMENT_BYTES)
   let used = 0
+  let totalBytes = 0
+  let seconds = 0
   const unsubscribe = bridge.onEvenHubEvent(event => {
     const bytes = toBytes(event.audioEvent?.audioPcm)
     if (!bytes) return
@@ -39,6 +43,12 @@ export async function startRecording(bridge: EvenAppBridge, onStorageFailure: ()
         buffer = new Uint8Array(PCM_SEGMENT_BYTES)
         used = 0
       }
+    }
+    totalBytes += bytes.length
+    const elapsed = Math.floor(totalBytes / (2 * AUDIO_SAMPLE_RATE))
+    if (elapsed !== seconds) {
+      seconds = elapsed
+      onSecond?.()
     }
   })
   try {
@@ -55,6 +65,7 @@ export async function startRecording(bridge: EvenAppBridge, onStorageFailure: ()
   }
   return {
     recording,
+    get seconds() { return seconds },
     async stop() {
       try {
         await closeMic()

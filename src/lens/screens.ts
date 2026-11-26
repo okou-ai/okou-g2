@@ -5,12 +5,12 @@ import {
 
 export type LensMode = 'quiet' | 'reader' | 'voice'
 export type Menu = 'reader' | 'voice'
-export type Indicator = 'off' | 'unread' | 'working'
+export type Indicator = 'off' | 'unread' | 'working' | 'listening'
 export interface LensPage {
   mode: LensMode
   menu: Menu | null
   body: string
-  footer: string
+  listening: string
   indicator: Indicator
 }
 
@@ -44,8 +44,17 @@ export function indicatorUpdate(level: number) {
   return new TextContainerUpgrade({ ...DOT, content: level ? DOT_GLYPH : ' ', textColor: level })
 }
 
+const VOICE = { containerID: 4, containerName: 'voice-status' }
+export function listeningLabel(seconds: number) {
+  const minutes = String(Math.floor(seconds / 60)).padStart(2, '0')
+  return '· Listening ' + minutes + ':' + String(seconds % 60).padStart(2, '0')
+}
+export function listeningUpdate(content: string, level: number) {
+  return new TextContainerUpgrade({ ...VOICE, content, textColor: level })
+}
+
 function layout(page: LensPage, level: number) {
-  const title = text(2, 'title', 'Okou', 4, 0, 490, 34)
+  const title = text(2, 'title', 'Okou', 4, 0, page.listening ? 336 : 490, 34)
   const dot = text(DOT.containerID, DOT.containerName, page.indicator === 'off' || !level ? '' : DOT_GLYPH, 560, 0, 16, 34)
   dot.textColor = level
   if (page.menu) {
@@ -62,13 +71,18 @@ function layout(page: LensPage, level: number) {
 
   const boxes = [text(1, 'body', page.body, 4, 36, 568, page.mode === 'voice' ? 210 : 252)]
   if (page.mode !== 'quiet') boxes.push(title)
-  boxes.push(dot)
-  if (page.footer) boxes.push(text(4, 'voice-status', page.footer, 480, 253, 96, 35))
+  if (page.listening) {
+    const status = text(VOICE.containerID, VOICE.containerName, page.listening, 356, 0, 220, 34)
+    status.textColor = level
+    boxes.push(status)
+  } else {
+    boxes.push(dot)
+  }
   return { containerTotalNum: boxes.length, textObject: boxes }
 }
 
 export const startupPage = () => new CreateStartUpPageContainer(layout({
-  mode: 'quiet', menu: null, body: '', footer: '', indicator: 'off',
+  mode: 'quiet', menu: null, body: '', listening: '', indicator: 'off',
 }, 4))
 
 export const lensPage = (page: LensPage, level: number) => new RebuildPageContainer(layout(page, level))
