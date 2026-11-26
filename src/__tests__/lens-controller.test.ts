@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
-  ImageRawDataUpdateResult, OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent, type ImageRawDataUpdate,
+  ImageRawDataUpdate, ImageRawDataUpdateResult, OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent,
   type CreateStartUpPageContainer, type RebuildPageContainer, type TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
 import type { RecordedVoice } from '../lens/recording'
@@ -8,8 +8,19 @@ import { getTextWidth } from '@evenrealities/pretext'
 import { listeningLabel } from '../lens/screens'
 import { LensController, type LensView } from '../lens/controller'
 import type { LensReply } from '../lens/messages'
+import { orbitFrame } from '../lens/orbit'
 
-const ready: LensView = { thread: 'bound', reply: null, working: false, task: null, status: '', canRecord: true, pending: false }
+vi.mock('../lens/orbit', async importOriginal => ({
+  ...await importOriginal<typeof import('../lens/orbit')>(),
+  // Only the WebView decodes the sprite sheet. Exercise the real native
+  // container, scheduling and update calls separately from that browser API.
+  orbitFrame: vi.fn(async (ms: number) => new ImageRawDataUpdate({
+    containerID: 10, containerName: 'orbit', imageData: Uint8Array.of(Math.floor(ms / 125)),
+  })),
+}))
+
+const ready: LensView = { awaitingSignIn: false, thread: 'bound', reply: null, working: false, task: null, status: '', canRecord: true, pending: false }
+const signingIn = { awaitingSignIn: true, canRecord: false, thread: null, status: 'Sign in on your phone' }
 const task = { kind: 'run', id: 'running' } as const
 const reply = (seqId: number, text: string): LensReply => ({ id: String(seqId), seqId, text })
 
@@ -59,6 +70,42 @@ async function setup(open = async () => true, stop = async () => true, initial: 
 }
 
 describe('glasses reader', () => {
+  it('keeps the orbit visible while phone sign-in is pending and opens the reply after approval', async () => {
+    const g = await setup(undefined, undefined, signingIn)
+    const startup = g.bridge.createStartUpPageContainer.mock.calls[0][0]
+    expect(startup.imageObject?.[0]?.containerName).toBe('orbit')
+    expect(g.box('secondary-hint')?.content).toBe(signingIn.status)
+    expect(g.box('primary-hint')).toBeUndefined()
+    const draws = g.bridge.updateImageRawData
+    const builds = g.bridge.rebuildPageContainer.mock.calls.length
+    await vi.advanceTimersByTimeAsync(16_000)
+    const first = draws.mock.lastCall?.[0]
+    await vi.advanceTimersByTimeAsync(125)
+    expect(draws.mock.lastCall?.[0].containerName).toBe('orbit')
+    expect(draws.mock.lastCall?.[0].imageData).not.toEqual(first?.imageData)
+    expect(g.bridge.rebuildPageContainer).toHaveBeenCalledTimes(builds)
+
+    await g.update({ reply: reply(1, 'Signed in') })
+    expect(g.box('body')?.content).toBe('Signed in')
+    const held = draws.mock.calls.length
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(draws).toHaveBeenCalledTimes(held)
+    expect(g.page().imageObject).toBeUndefined()
+    await g.update(signingIn)
+    expect(g.page().imageObject?.[0]?.containerName).toBe('orbit')
+  })
+
+  it('skips an orbit frame if the reply arrived while the sign-in artwork was decoding', async () => {
+    let finish!: (image: ImageRawDataUpdate) => void
+    vi.mocked(orbitFrame).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const g = await setup(undefined, undefined, signingIn)
+    await g.update({ reply: reply(1, 'Restored conversation') })
+    finish(new ImageRawDataUpdate({ containerID: 10, containerName: 'orbit', imageData: [0] }))
+    await vi.advanceTimersByTimeAsync(500)
+    expect(g.box('body')?.content).toBe('Restored conversation')
+    expect(g.bridge.updateImageRawData).not.toHaveBeenCalled()
+  })
+
   it('opens on the latest reply and keeps a reply unread if displaying it after sleep fails', async () => {
     const first = reply(1, 'Already in the conversation')
     const g = await setup(undefined, undefined, { reply: first })

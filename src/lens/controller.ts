@@ -5,8 +5,10 @@ import { startRecording, type Recorder } from './audio'
 import type { LensReply, TaskTarget } from './messages'
 import { indicatorUpdate, listeningLabel, statusUpdate, startupPage, lensPage, menuItems, paginate, type LensPage } from './screens'
 import { FRAME_MS, unreadDot, workingDots } from './standby'
+import { orbitFrame } from './orbit'
 
 export interface LensView {
+  awaitingSignIn: boolean
   thread: string | null
   reply: LensReply | null
   working: boolean
@@ -21,7 +23,7 @@ type Voice = (target: string, audio: RecordedVoice) => Promise<'sent' | 'pending
 const READER_IDLE_MS = 15_000
 
 export class LensController {
-  private view: LensView = { thread: null, reply: null, working: false, task: null, status: '', canRecord: false, pending: false }
+  private view: LensView = { awaitingSignIn: true, thread: null, reply: null, working: false, task: null, status: '', canRecord: false, pending: false }
   private stage: Stage = 'reader'
   private menu: { task: TaskTarget | null } | null = null
   private readSeq = 0
@@ -46,8 +48,8 @@ export class LensController {
   private closed = false
   private sleepTimer?: ReturnType<typeof setTimeout>
   private frameTimer?: ReturnType<typeof setTimeout>
-  private waveStart?: number
-  private lastStandbyImage?: ImageRawDataUpdate
+  private animationStart?: number
+  private lastImage?: ImageRawDataUpdate
   private exitDialog = false
   private micCleanup: Promise<void> = Promise.resolve()
 
@@ -65,13 +67,14 @@ export class LensController {
 
   update(view: LensView) {
     const changedThread = view.thread !== this.view.thread
+    const changedLogin = view.awaitingSignIn !== this.view.awaitingSignIn
     const { reply } = view
     const changedReply = changedThread || reply?.id !== this.view.reply?.id || reply?.text !== this.view.reply?.text
     this.view = view
     if (view.pending) this.menu = null
-    if (changedThread) {
+    if (changedThread || changedLogin) {
       this.readSeq = 0
-      if (this.stage !== 'quiet') this.resetToReader()
+      if (changedLogin || this.stage !== 'quiet') this.resetToReader()
     }
     if (changedReply) {
       this.pageIndex = 0
@@ -88,7 +91,7 @@ export class LensController {
 
   close() {
     this.closed = true
-    this.stopWave()
+    this.stopAnimation()
     if (typeof document !== 'undefined') document.documentElement?.removeEventListener('animationiteration', this.heartbeat)
     this.animateWork(false)
     this.unsubscribe?.()
@@ -114,7 +117,7 @@ export class LensController {
 
   private leaveDisplay() {
     this.active = false
-    this.stopWave()
+    this.stopAnimation()
     this.exitDialog = false
     this.pageIndex = 0
     this.animateWork(false)
@@ -125,6 +128,7 @@ export class LensController {
     if (exitMode === 0) this.leaveDisplay()
     else {
       this.exitDialog = true
+      this.stopAnimation()
       this.clearSleepTimer()
     }
     try {
@@ -306,6 +310,10 @@ export class LensController {
     switch (stage) {
       case 'quiet': break
       case 'reader':
+        if (this.view.awaitingSignIn && !this.menu) {
+          secondaryHint = this.view.status
+          break
+        }
         status = working ? '● Working' : this.note || this.view.status
         primaryHint = this.view.canRecord ? 'Tap to speak' : 'Tap to refresh'
         secondaryHint = 'Hold: menu'
@@ -326,7 +334,8 @@ export class LensController {
       primaryHint = 'Tap to select'
       secondaryHint = 'Swipe: choose · Hold: back'
     }
-    return { mode, menu: !!this.menu, body, status, primaryHint, scrollHint, secondaryHint, indicator }
+    const orbit = stage === 'reader' && !this.menu && !this.view.reply && !this.view.task && !working && !this.note
+    return { mode, menu: !!this.menu, orbit, body, status, primaryHint, scrollHint, secondaryHint, indicator }
   }
 
   private animateWork(enabled: boolean) {
@@ -339,30 +348,34 @@ export class LensController {
     this.sleepTimer = undefined
   }
 
-  private stopWave() {
+  private stopAnimation() {
     if (this.frameTimer !== undefined) clearTimeout(this.frameTimer)
     this.frameTimer = undefined
-    this.waveStart = undefined
+    this.animationStart = undefined
   }
 
-  private async drawStandby(indicator: 'working' | 'unread', rebuilt: boolean) {
+  private async drawImage(kind: 'orbit' | 'working' | 'unread', rebuilt: boolean) {
     let image = unreadDot
-    if (indicator === 'working') {
+    if (kind !== 'unread') {
       const now = performance.now()
-      this.waveStart ??= now
-      image = workingDots(now - this.waveStart)
+      this.animationStart ??= now
+      const elapsed = now - this.animationStart
+      if (kind === 'orbit') {
+        image = await orbitFrame(elapsed)
+        if (this.closed || !this.active || this.exitDialog || !this.page().orbit) return
+      } else image = workingDots(elapsed)
     }
-    if (rebuilt || this.lastStandbyImage !== image) {
+    if (rebuilt || this.lastImage !== image) {
       const result = await this.bridge.updateImageRawData(image)
-      if (result === ImageRawDataUpdateResult.success) this.lastStandbyImage = image
-      else if (indicator !== 'working' || result !== ImageRawDataUpdateResult.sendFailed) {
-        throw new Error('Could not update the G2 standby indicator')
+      if (result === ImageRawDataUpdateResult.success) this.lastImage = image
+      else if (kind === 'unread' || result !== ImageRawDataUpdateResult.sendFailed) {
+        throw new Error('Could not update the G2 display image')
       }
     }
     // Schedule only after the bridge has accepted the frame. A slow transfer
     // skips missed poses instead of replaying them after a wake or new reply.
-    if (this.waveStart !== undefined && this.frameTimer === undefined) {
-      const elapsed = performance.now() - this.waveStart
+    if (this.animationStart !== undefined && this.frameTimer === undefined) {
+      const elapsed = performance.now() - this.animationStart
       this.frameTimer = setTimeout(() => {
         this.frameTimer = undefined
         this.draw()
@@ -371,7 +384,7 @@ export class LensController {
   }
 
   private syncSleepTimer() {
-    if (this.closed || !this.active || !this.unsubscribe || this.screenStage !== 'reader' || this.menu || this.exitDialog) {
+    if (this.closed || !this.active || !this.unsubscribe || this.view.awaitingSignIn || this.screenStage !== 'reader' || this.menu || this.exitDialog) {
       this.clearSleepTimer()
     } else if (this.sleepTimer === undefined) {
       this.sleepTimer = setTimeout(() => {
@@ -389,29 +402,29 @@ export class LensController {
       if (this.closed || !this.active) return
       const page = this.page()
       const quiet = page.mode === 'quiet'
-      const key = JSON.stringify([page.menu, page.mode, quiet && page.indicator, page.body, getTextWidth(page.status), page.primaryHint, page.scrollHint, page.secondaryHint])
+      const key = JSON.stringify([page.menu, page.mode, page.orbit, quiet && page.indicator, page.body, getTextWidth(page.status), page.primaryHint, page.scrollHint, page.secondaryHint])
+      const rebuilt = key !== this.lastPage
+      const image = page.orbit ? 'orbit' : quiet ? page.indicator : 'off'
       // The recording clock and brightness both advance with captured PCM.
       const recording = this.stage === 'recording' && !!this.recorder
-      if (!quiet || page.indicator !== 'working') this.stopWave()
+      if (rebuilt || (image !== 'working' && image !== 'orbit')) this.stopAnimation()
       this.animateWork(!quiet && !recording && page.indicator === 'working')
       const dim = recording ? this.recorder!.seconds % 2 === 1 : this.dim
       const level = page.status || page.indicator !== 'off' ? (dim ? 2 : 4) : 0
       const { thread, reply } = this.view
-      const rebuilt = key !== this.lastPage
       if (rebuilt) {
         if (!await this.bridge.rebuildPageContainer(lensPage(page, level))) throw new Error('Could not update the G2 display')
         this.lastPage = key
       }
       if (this.closed || !this.active) return
-      if (quiet) {
-        if (page.indicator !== 'off') await this.drawStandby(page.indicator, rebuilt)
-      } else if (!rebuilt) {
+      if (!quiet && !rebuilt) {
         if (page.status && (this.lastStatus !== page.status || level !== this.lastDotLevel)) {
           if (!await this.bridge.textContainerUpgrade(statusUpdate(page.status, level))) throw new Error('Could not update the G2 recording status')
-        } else if (level !== this.lastDotLevel) {
+        } else if (!page.orbit && level !== this.lastDotLevel) {
           if (!await this.bridge.textContainerUpgrade(indicatorUpdate(level))) throw new Error('Could not update the G2 indicator')
         }
       }
+      if (image !== 'off' && !this.exitDialog) await this.drawImage(image, rebuilt)
       this.lastStatus = page.status
       this.lastDotLevel = level
       if (this.closed || !this.active) return

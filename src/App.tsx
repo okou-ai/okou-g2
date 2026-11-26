@@ -42,7 +42,8 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     : chat.error ? 'Sync failed · tap to retry'
     : !chat.thread ? 'Opening conversation…'
     : chat.syncing && !chat.reply && !chat.working ? 'Loading messages…' : ''
-  const view: LensView = { thread: userId ? chat.thread : null, reply: userId ? chat.reply : null,
+  const view: LensView = { awaitingSignIn: login.phase !== 'ready',
+    thread: userId ? chat.thread : null, reply: userId ? chat.reply : null,
     task: userId ? chat.task : null, working: !!userId && chat.working, status,
     pending: !!userId && chat.pending, canRecord: !!userId && !!chat.thread && !chat.error }
   const currentView = useRef(view)

@@ -4,6 +4,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { getTextWidth, measureTextWrap } from '@evenrealities/pretext'
 import { BODY, LENS_HEIGHT, LENS_WIDTH, LINE_HEIGHT } from './display'
+import { orbitContainer } from './orbit'
 import { standbyContainer } from './standby'
 
 export type LensMode = 'quiet' | 'reader' | 'voice'
@@ -11,6 +12,7 @@ export type Indicator = 'off' | 'unread' | 'working'
 export interface LensPage {
   mode: LensMode
   menu: boolean
+  orbit: boolean
   body: string
   status: string
   primaryHint: string
@@ -67,13 +69,15 @@ function layout(page: LensPage, level: number) {
     if (unread) boxes.push(text(2, 'title', 'OKOU', 27, 0, getTextWidth('OKOU'), LINE_HEIGHT))
     return { containerTotalNum: boxes.length + 1, textObject: boxes, imageObject: [standbyContainer(unread)] }
   }
-  boxes.push(text(2, 'title', 'OKOU', 0, 0, getTextWidth('OKOU'), LINE_HEIGHT))
+  const title = text(2, 'title', 'OKOU', 0, 0, getTextWidth('OKOU'), LINE_HEIGHT)
+  if (page.orbit) title.isEventCapture = 1
+  boxes.push(title)
   if (page.status) {
     const width = getTextWidth(page.status)
     const status = text(VOICE.containerID, VOICE.containerName, page.status, LENS_WIDTH - width, 0, width, LINE_HEIGHT)
     status.textColor = level
     boxes.push(status)
-  } else {
+  } else if (!page.orbit) {
     const width = getTextWidth(DOT_GLYPH)
     const dot = text(DOT.containerID, DOT.containerName, page.indicator === 'off' ? '' : DOT_GLYPH, LENS_WIDTH - width, 0, width, LINE_HEIGHT)
     dot.textColor = level
@@ -101,6 +105,7 @@ function layout(page: LensPage, level: number) {
     })
     return { containerTotalNum: boxes.length + 1, textObject: boxes, listObject: [list] }
   }
+  if (page.orbit) return { containerTotalNum: boxes.length + 1, textObject: boxes, imageObject: [orbitContainer()] }
   boxes.push(text(1, 'body', page.body, BODY.x, BODY.y, BODY.width, BODY.height))
   return { containerTotalNum: boxes.length, textObject: boxes }
 }
