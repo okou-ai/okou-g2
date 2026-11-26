@@ -1,31 +1,18 @@
-import 'fake-indexeddb/auto'
-import { clear, createStore, get } from 'idb-keyval'
 import { UnsecuredJWT } from 'jose'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { OkouApiClient } from '../api/client'
-import { DEVICE_CLIENT_ID, DEVICE_SCOPE, MCP_URL } from '../config'
+import { API_BASE_URL, DEVICE_CLIENT_ID, DEVICE_SCOPE } from '../config'
 import { InstalledGrant } from '../installed-grant'
 import { rpc, toolResult } from './mcp-fixture'
-import type { InstallStorage } from '../install-storage'
+import { host } from './install-fixture'
 import { DeviceStore } from '../store'
 
-const authDatabase = createStore('okou-g2-auth', 'grants')
-const threadDatabase = createStore('okou-g2-device', 'chat')
 const owner = { userId: 'user_fixture', orgId: 'org_fixture' }
 // Clerk device-code grants may include the requested scopes without an audience.
 const access = new UnsecuredJWT({ sub: owner.userId, org_id: owner.orgId, client_id: DEVICE_CLIENT_ID, scope: DEVICE_SCOPE })
   .setExpirationTime('1h').encode()
 const grant = (refresh_token: string) => Response.json({ access_token: access, token_type: 'Bearer', refresh_token })
 const api = new OkouApiClient(async () => access, new AbortController().signal)
-
-function host() {
-  const records = new Map<string, string>()
-  const storage: InstallStorage = {
-    getLocalStorage: async (key) => records.get(key) ?? '',
-    setLocalStorage: async (key, value) => { records.set(key, value); return true },
-  }
-  return { records, storage, open: async () => storage }
-}
 
 function browserCookies() {
   let current = ''
@@ -34,30 +21,22 @@ function browserCookies() {
     set cookie(value: string) { current = value.includes('Max-Age=0') ? '' : value.split(';')[0] },
   }
 }
-beforeEach(async () => {
-  await Promise.all([clear(authDatabase), clear(threadDatabase)])
+beforeEach(() => {
   vi.stubGlobal('document', browserCookies())
   vi.stubGlobal('location', new URL('http://127.0.0.1:56844/'))
 })
 afterEach(() => vi.unstubAllGlobals())
 
-it('requires both the package store and the host cookie to use a rotating grant, and revokes it across ports', async () => {
+it('restores the rotating grant only in the same package and revokes it across ports', async () => {
   const installed = host()
   const fetch = vi.fn(async (_url: string, _init: RequestInit) => new Response())
     .mockResolvedValueOnce(grant('fixture-first')).mockResolvedValueOnce(grant('fixture-rotated'))
   vi.stubGlobal('fetch', fetch)
   expect((await new InstalledGrant(installed.open).token('fixture-device')).temporary).toBeUndefined()
-  const cookie = document.cookie
-  const records = JSON.stringify([...installed.records])
-  expect(cookie).toBeTruthy()
-  expect(records).not.toContain(cookie.split('=')[1])
-  expect(records + cookie).not.toContain('fixture-first')
-  expect(records + cookie).not.toContain(access)
+  expect(document.cookie).toBe('')
+  expect([...installed.records.values()].join('')).not.toContain(access)
   await expect(new InstalledGrant(host().open).refresh()).rejects.toMatchObject({ code: 'signed_out' })
-  document.cookie = ''
-  await expect(new InstalledGrant(installed.open).refresh()).rejects.toMatchObject({ code: 'signed_out' })
   expect(fetch).toHaveBeenCalledTimes(1)
-  document.cookie = cookie
   vi.stubGlobal('location', new URL('http://127.0.0.1:57984/'))
   expect(await new InstalledGrant(installed.open).refresh()).toMatchObject(owner)
   await new InstalledGrant(installed.open).logout()
@@ -71,31 +50,37 @@ it('requires both the package store and the host cookie to use a rotating grant,
   expect(fetch).toHaveBeenCalledTimes(3)
 })
 
-it('carries an accessible 0.4.3 grant and thread into the package before the old origin is lost', async () => {
+it('opens the 0.4.17 encrypted native login and existing thread, then reopens on a new port with no cookie', async () => {
   const installed = host()
-  const browser = async () => null
+  const legacyThread = crypto.randomUUID()
+  const account = JSON.stringify([API_BASE_URL, owner.userId, owner.orgId])
+  installed.records.set('okou.g2.thread.v1.' + account, JSON.stringify({ id: legacyThread, ready: true }))
+  // Real v1 encoding of a fixture grant with fixed test-only key shares and IV.
+  const oldSlot = 'okou.g2.grant.v1.dYd7tB05O1-4RVzmDs2N2gAdBjFklrFN-n-JVlbuyko'
+  installed.records.set('okou.g2.install.v1', 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE')
+  installed.records.set(oldSlot, 'AwMDAwMDAwMDAwMD.d93tNrUoQgukdoHLANPCa39AxYTTwdq7Lqhofz_MiVFPf7rkUMwI1spHg_imKs5IFYbumKJmHqubFq-nUgwC0pvd9f5607eDlL9YVK0')
+  document.cookie = 'okou_g2_session_' + DEVICE_CLIENT_ID + '=AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI'
+  const tokens: string[] = []
   const create = vi.fn()
   vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
-    if (url.endsWith('/oauth/token')) return grant('fixture-latest')
-    expect(url).toBe(MCP_URL)
-    const message = rpc(init)
-    expect(message.params.name).toBe('create_chat_thread')
-    const threadId = message.params.arguments.clientThreadId
-    create(threadId)
-    return toolResult(init, { threadId })
+    if (url.endsWith('/oauth/token')) {
+      tokens.push(new URLSearchParams(String(init.body)).get('refresh_token')!)
+      return grant('fixture-latest')
+    }
+    const args = rpc(init).params.arguments
+    create(args.clientThreadId)
+    return toolResult(init, { threadId: args.clientThreadId })
   })
-  await new InstalledGrant(browser).token('fixture-device')
-  const legacy = await new DeviceStore(owner, browser).fixedThread(api)
-  await new InstalledGrant(installed.open).refresh()
-  expect(await get(DEVICE_CLIENT_ID, authDatabase)).toBeUndefined()
-  expect(await new DeviceStore(owner, installed.open).fixedThread(api)).toBe(legacy)
-  await Promise.all([clear(authDatabase), clear(threadDatabase)])
+  expect(await new InstalledGrant(installed.open).refresh()).toMatchObject(owner)
+  expect(document.cookie).toBe('')
+  expect(installed.records.get(oldSlot)).toBe('')
   vi.stubGlobal('location', new URL('http://127.0.0.1:57984/'))
   expect(await new InstalledGrant(installed.open).refresh()).toMatchObject(owner)
-  expect(await new DeviceStore(owner, installed.open).fixedThread(api)).toBe(legacy)
-  expect(create.mock.calls).toEqual([[legacy]])
+  expect(await new DeviceStore(owner, installed.open).fixedThread(api)).toBe(legacyThread)
+  expect(create).not.toHaveBeenCalled()
+  expect(tokens).toEqual(['fixture-legacy', 'fixture-latest'])
   const other = await new DeviceStore({ ...owner, orgId: 'org_other' }, installed.open).fixedThread(api)
-  expect(other).not.toBe(legacy)
+  expect(other).not.toBe(legacyThread)
 })
 
 it('does not resurrect a signed-out session when an earlier refresh later succeeds', async () => {
@@ -114,9 +99,9 @@ it('does not resurrect a signed-out session when an earlier refresh later succee
   await expect(new InstalledGrant(installed.open).refresh()).rejects.toMatchObject({ code: 'signed_out' })
 })
 
-it('keeps a redeemed code usable for this launch when the WebView disallows the cookie', async () => {
+it('keeps a redeemed code usable for this launch when the native store refuses a write', async () => {
   const installed = host()
-  vi.stubGlobal('document', { get cookie() { return '' }, set cookie(_value: string) { /* rejected by host */ } })
+  installed.storage.setLocalStorage = async () => false
   const fetch = vi.fn().mockResolvedValueOnce(grant('fixture-first')).mockResolvedValueOnce(grant('fixture-next'))
   vi.stubGlobal('fetch', fetch)
   const open = new InstalledGrant(installed.open)
@@ -143,7 +128,7 @@ it('keeps a newer rotation when another port receives a late invalid_grant', asy
   expect(new URLSearchParams(String(fetch.mock.calls[3][1].body)).get('refresh_token')).toBe('fixture-current')
 })
 
-it('allows a new interactive sign-in after a sealed package record becomes unreadable', async () => {
+it('allows a new interactive sign-in after its native grant record becomes unreadable', async () => {
   const installed = host()
   const fetch = vi.fn().mockResolvedValueOnce(grant('fixture-first'))
     .mockResolvedValueOnce(grant('fixture-second')).mockResolvedValueOnce(grant('fixture-rotated'))

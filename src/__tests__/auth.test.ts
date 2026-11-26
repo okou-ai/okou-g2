@@ -2,19 +2,11 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DeviceAuth } from '../auth'
 import { AuthError, InstalledGrant } from '../installed-grant'
 import { version } from '../../app.json'
-const memory = () => {
-  const map = new Map<string, string>()
-  return { setItem: (key: string, value: string) => map.set(key, value),
-    removeItem: (key: string) => map.delete(key), getItem: (key: string) => map.get(key) ?? null }
-}
 const code = { user_code: 'FIXTURE', device_code: 'fixture-only', verification_uri: 'https://example.test/activate',
   expires_in: 90, interval: 2 }
 const session = () => ({ accessToken: 'test-access', userId: 'user_test', orgId: 'org_test', expiresAt: Date.now() + 60_000 })
 
-beforeEach(() => {
-  vi.useFakeTimers()
-  vi.stubGlobal('localStorage', memory()); vi.stubGlobal('sessionStorage', memory())
-})
+beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 it('reports the installed build, origin and a safe OAuth failure without exposing provider text', async () => {
@@ -52,33 +44,18 @@ it('honours the device interval, slow_down and a workspace grant', async () => {
   vi.advanceTimersByTime(1)
   await auth.check()
   expect(auth.snapshot()).toMatchObject({ phase: 'ready', session: { orgId: 'org_test' } })
-  expect(sessionStorage.getItem('okou-g2/device-code')).toBeNull()
 })
 
-it('restores the pending code on return to the WebView and stops polling after denial', async () => {
+it('checks the current device code on return and stops after the user declines it', async () => {
   const grants = new InstalledGrant()
-  vi.spyOn(grants, 'refresh').mockRejectedValue(new AuthError('signed_out', 401))
+  vi.spyOn(grants, 'device').mockResolvedValue(code)
   const token = vi.spyOn(grants, 'token').mockRejectedValue(new AuthError('access_denied', 400))
-  sessionStorage.setItem('okou-g2/device-code', JSON.stringify({ ...code, nextPollAt: Date.now() + 2000, expiresAt: Date.now() + 90_000 }))
   const auth = new DeviceAuth(grants)
-  await auth.restore()
-  expect(auth.snapshot().phase).toBe('verify')
+  await auth.begin()
   vi.advanceTimersByTime(2000)
   await auth.check()
   expect(auth.snapshot()).toMatchObject({ phase: 'signed-out', error: 'Authorization was declined.' })
-  expect(token).toHaveBeenCalledTimes(1)
-})
-
-it('keeps an issued session if the WebView cannot clear its pending code', async () => {
-  const grants = new InstalledGrant()
-  vi.spyOn(grants, 'device').mockResolvedValue(code)
-  const token = vi.spyOn(grants, 'token').mockResolvedValue(session())
-  const auth = new DeviceAuth(grants)
-  await auth.begin()
-  vi.spyOn(sessionStorage, 'removeItem').mockImplementation(() => { throw new Error('Storage unavailable') })
-  vi.advanceTimersByTime(2000)
   await auth.check()
-  expect(auth.snapshot()).toMatchObject({ phase: 'ready', session: { orgId: 'org_test' } })
   expect(token).toHaveBeenCalledTimes(1)
 })
 

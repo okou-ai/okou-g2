@@ -13,11 +13,7 @@ const ready: LensView = { thread: 'bound', reply: null, working: false, task: nu
 const task = { kind: 'run', id: 'running' } as const
 const reply = (seqId: number, text: string): LensReply => ({ id: String(seqId), seqId, text })
 
-beforeEach(() => {
-  vi.useFakeTimers()
-  const store = new Map<string, string>()
-  vi.stubGlobal('localStorage', { getItem: (key: string) => store.get(key), setItem: (key: string, value: string) => store.set(key, value) })
-})
+beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 async function setup(open = async () => true, stop = async () => true) {
@@ -62,7 +58,7 @@ async function setup(open = async () => true, stop = async () => true) {
 }
 
 describe('glasses reader', () => {
-  it('opens blank, marks a reply read only after displaying it, and restores that cursor per thread', async () => {
+  it('opens blank, marks a reply read only after displaying it in this launch', async () => {
     const g = await setup()
     const answer = reply(2, 'This is the latest reply.')
     expect(g.page().textObject!.every(v => !v.content)).toBe(true)
@@ -82,8 +78,6 @@ describe('glasses reader', () => {
     g.controller.close()
     const reopened = await setup()
     await reopened.update({ reply: answer })
-    expect(reopened.box('indicator')?.content).toBe('')
-    await reopened.update({ thread: 'another', reply: answer })
     expect(reopened.box('indicator')?.content).toBeTruthy()
   })
 

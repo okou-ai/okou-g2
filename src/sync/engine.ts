@@ -1,11 +1,16 @@
 import { ApiError, OkouApiClient, type TokenProvider } from '../api/client'
 import { requireCancellationGrant } from '../device-protocol'
-import { DeviceStore, type Pending } from '../store'
+import { DeviceStore } from '../store'
 import type { Identity } from '../types'
 import type { RecordedVoice } from '../lens/recording'
 import { LENS_CONTEXT } from '../lens/display'
 import type { LensReply, TaskTarget } from '../lens/messages'
 import { readHistory, type History } from './messages'
+
+interface PendingVoice {
+  clientEventId: string
+  fileIds: string[]
+}
 
 export interface ChatState {
   thread: string | null
@@ -28,6 +33,7 @@ export class DeviceChat {
   private readonly api: OkouApiClient
   private readonly store: DeviceStore
   private history: History | null = null
+  private pending: PendingVoice | null = null
   private acceptedInput: string | null = null
   private unwatch?: () => void
   private refreshing: Promise<void> | null = null
@@ -54,9 +60,8 @@ export class DeviceChat {
     this.unwatch?.()
     this.history = null
     this.acceptedInput = null
-    const pending = !!await this.store.pending(id)
-    this.abort.signal.throwIfAborted()
-    this.publish({ thread: id, reply: null, task: null, working: false, pending, live: false })
+    this.pending = null
+    this.publish({ thread: id, reply: null, task: null, working: false, pending: false, live: false })
     // Opening the reader does not depend on loading or connecting Ably.
     void import('./realtime').then(({ watchThread }) => {
       if (this.abort.signal.aborted || this.state.thread !== id) return
@@ -84,7 +89,6 @@ export class DeviceChat {
         this.dirty = false
         if (!this.state.thread) await this.bind()
         const id = this.state.thread!
-        const pending = await this.store.pending(id)
         let history
         try {
           history = await readHistory(this.api, id, this.history)
@@ -100,11 +104,10 @@ export class DeviceChat {
         }
         this.abort.signal.throwIfAborted()
         this.history = history
-        if (pending && this.observedInput(pending.clientEventId)) await this.store.acknowledge(id, pending.clientEventId)
-        const stillPending = !!await this.store.pending(id)
+        if (this.pending && this.observedInput(this.pending.clientEventId)) this.pending = null
         if (this.acceptedInput && this.observedInput(this.acceptedInput)) this.acceptedInput = null
         this.publish({ reply: history.reply, task: history.task, working: history.working || !!this.acceptedInput,
-          pending: stillPending, error: null })
+          pending: !!this.pending, error: null })
       }
     } catch (error) {
       this.publish({ error: error instanceof Error ? error.message : 'Could not read the conversation' })
@@ -120,28 +123,30 @@ export class DeviceChat {
     return this.history?.facts.some(row => row.id === id || row.revokesEventId === id)
   }
 
-  private async submit(thread: string, pending: Pending, token: string, firstAttempt: boolean): Promise<'sent' | 'pending'> {
+  private async submit(thread: string, pending: PendingVoice, token: string, firstAttempt: boolean): Promise<'sent' | 'pending'> {
     const { fileIds, clientEventId } = pending
+    this.pending = pending
     this.publish({ pending: true })
     try {
       const reply = await this.api.call<{ threadId: string; eventId: string }>('send_chat_message', {
         threadId: thread, clientEventId,
         userMessage: { version: 1, parts: [
           ...fileIds.map(fileId => ({ type: 'voice', clips: [{ fileId }] })),
-          ...(pending.additionalInfo ? [{ type: 'additional_info', text: pending.additionalInfo }] : []),
+          { type: 'additional_info', text: LENS_CONTEXT },
         ] },
       }, token)
       if (reply.threadId !== thread || reply.eventId !== clientEventId) return 'pending'
     } catch (error) {
+      if (this.observedInput(clientEventId)) return 'sent'
       if (!(error instanceof ApiError && error.rejected)) return 'pending'
-      if (firstAttempt) {
-        await this.store.acknowledge(thread, clientEventId)
+      if (firstAttempt && this.pending === pending) {
+        this.pending = null
         this.publish({ pending: false })
       }
       throw error
     }
-    await this.store.acknowledge(thread, clientEventId)
     if (this.state.thread === thread) {
+      if (this.pending === pending) this.pending = null
       this.acceptedInput = this.observedInput(clientEventId) ? null : clientEventId
       this.publish({ pending: false, working: !!this.acceptedInput || !!this.history?.working })
     }
@@ -167,7 +172,8 @@ export class DeviceChat {
     if (this.sending) throw new Error('Another recording is being sent')
     this.sending = true
     try {
-      if (await this.store.pending(thread)) throw new Error('The previous send is awaiting confirmation')
+      if (this.acceptedInput === audio.clientEventId || this.observedInput(audio.clientEventId)) return 'sent'
+      if (this.pending) throw new Error('The previous send is awaiting confirmation')
       const fileCount = audio.fileCount
       if (!fileCount) throw new Error('No audio captured')
       const fileIds = this.uploaded.get(audio) ?? []
@@ -175,18 +181,13 @@ export class DeviceChat {
       // Keep each completed upload across an explicit retry. The ordered parts
       // form one chat input even when a recording exceeds one transcription batch.
       while (fileIds.length < fileCount) {
-        const wav = await audio.file(fileIds.length)
+        const wav = audio.file(fileIds.length)
         this.assertTarget(thread)
         fileIds.push(await this.api.upload(wav))
       }
       const token = await this.api.getToken()
       this.assertTarget(thread)
-      const pending = await this.store.reserveSend(thread, fileIds, LENS_CONTEXT)
-      try { this.assertTarget(thread) } catch (error) {
-        await this.store.acknowledge(thread, pending.clientEventId)
-        throw error
-      }
-      return await this.submit(thread, pending, token, true)
+      return await this.submit(thread, { clientEventId: audio.clientEventId, fileIds }, token, true)
     } finally {
       this.sending = false
       void this.refresh()
@@ -197,14 +198,13 @@ export class DeviceChat {
   // thread. Only an explicit retry replays the exact saved clip and IDs.
   async retryPending() {
     const thread = this.state.thread
-    if (!thread || this.sending) return
+    const pending = this.pending
+    if (!thread || !pending || this.sending) return
     this.sending = true
     try {
-      const pending = await this.store.pending(thread)
-      if (!pending) return
       const token = await this.api.getToken()
       this.assertTarget(thread)
-      await this.submit(thread, pending, token, false)
+      if (this.pending === pending) await this.submit(thread, pending, token, false)
     } finally {
       this.sending = false
       void this.refresh()

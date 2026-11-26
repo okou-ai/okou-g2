@@ -5,9 +5,6 @@ import { hasEvenAppHost } from './glasses'
 import './styles.css'
 
 const auth = new DeviceAuth()
-window.addEventListener('storage', (event) => {
-  if (event.key === 'okou-g2/signed-out') void auth.restore()
-})
 const root = createRoot(document.getElementById('root')!)
 let startedWithHost: boolean | undefined
 function start() {

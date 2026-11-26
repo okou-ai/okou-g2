@@ -15,9 +15,6 @@ export type LoginState =
   | { phase: 'verify'; challenge: Challenge; notice?: string }
   | { phase: 'ready'; session: DeviceSession }
 
-const CHALLENGE = 'okou-g2/device-code'
-const SIGNED_OUT = 'okou-g2/signed-out'
-
 function deviceStartError(error: unknown) {
   const origin = typeof location === 'undefined' ? '' : ' · ' + location.origin
   const build = 'G2 ' + version + origin
@@ -51,34 +48,15 @@ export class DeviceAuth {
     const revision = ++this.revision
     this.set({ phase: 'loading' })
     try {
-      let consentError: string | undefined
-      let signedOut = false
-      try { signedOut = !!localStorage.getItem(SIGNED_OUT) } catch { /* Even's install store is independent. */ }
-      if (!signedOut || await this.grants.hasInstalledSession()) {
-        try {
-          const session = await exclusive('okou-g2/oauth', () => this.grants.refresh())
-          if (this.revision !== revision) return
-          this.accept(session)
-          return
-        } catch (error) {
-          if (!(error instanceof AuthError && error.status === 401)) throw error
-          if (error.code === 'mcp_grant_required') consentError = MCP_GRANT_PROMPT
-        }
-      }
+      const session = await exclusive('okou-g2/oauth', () => this.grants.refresh())
+      if (this.revision === revision) this.accept(session)
+    } catch (error) {
       if (this.revision !== revision) return
-      const data = sessionStorage.getItem(CHALLENGE)
-      if (data) {
-        const challenge: Challenge = JSON.parse(data)
-        if (challenge.expiresAt > Date.now()) {
-          this.wait(challenge)
-          await this.check()
-          return
-        }
-        sessionStorage.removeItem(CHALLENGE)
+      if (error instanceof AuthError && error.status === 401) {
+        this.set({ phase: 'signed-out', error: error.code === 'mcp_grant_required' ? MCP_GRANT_PROMPT : undefined })
+      } else {
+        this.set({ phase: 'signed-out', error: 'Could not restore sign-in. Check your connection and try again.' })
       }
-      this.set({ phase: 'signed-out', error: consentError })
-    } catch {
-      if (revision === this.revision) this.set({ phase: 'signed-out', error: 'Could not restore sign-in. Check your connection and try again.' })
     }
   }
 
@@ -96,7 +74,6 @@ export class DeviceAuth {
   }
 
   private wait(challenge: Challenge, notice?: string) {
-    try { sessionStorage.setItem(CHALLENGE, JSON.stringify(challenge)) } catch { /* Keep the challenge in memory. */ }
     this.set({ phase: 'verify', challenge, notice })
   }
 
@@ -142,17 +119,10 @@ export class DeviceAuth {
         else if (code !== 'expired_token') message = 'Could not finish device sign-in. Start again.'
       }
     }
-    sessionStorage.removeItem(CHALLENGE)
     this.set({ phase: 'signed-out', error: message })
   }
 
   private accept(session: DeviceSession) {
-    try {
-      sessionStorage.removeItem(CHALLENGE)
-      localStorage.removeItem(SIGNED_OUT)
-    } catch {
-      // A WebView storage error must not turn an issued session into another token poll.
-    }
     this.set({ phase: 'ready', session })
   }
 
@@ -181,8 +151,6 @@ export class DeviceAuth {
 
   async signOut() {
     const revision = ++this.revision
-    try { localStorage.setItem(SIGNED_OUT, '1') } catch { /* A memory-only session can still sign out. */ }
-    try { sessionStorage.removeItem(CHALLENGE) } catch { /* Revocation still proceeds. */ }
     this.set({ phase: 'loading' })
     try {
       await exclusive('okou-g2/oauth', () => this.grants.logout())

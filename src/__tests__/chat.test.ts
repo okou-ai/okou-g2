@@ -1,9 +1,7 @@
-import 'fake-indexeddb/auto'
-import { createStore, set } from 'idb-keyval'
 import { UnsecuredJWT } from 'jose'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { OkouApiClient } from '../api/client'
-import { API_BASE_URL, CHAT_SCOPES, DEVICE_SCOPE, MCP_URL } from '../config'
+import { CHAT_SCOPES, DEVICE_SCOPE, MCP_URL } from '../config'
 import { DeviceStore } from '../store'
 import { DeviceChat, initialChat, type ChatState } from '../sync/engine'
 import { startRecording } from '../lens/audio'
@@ -224,7 +222,7 @@ describe('cancel current task', () => {
 })
 
 describe('voice delivery', () => {
-  it('spools a continuous 14-minute take, retries only the unfinished WAV and sends one ordered input', async () => {
+  it('buffers a continuous 14-minute take, retries only the unfinished WAV and sends one ordered input', async () => {
     const owner = identity(), files: string[] = [crypto.randomUUID(), crypto.randomUUID()]
     const storage = 'https://user-artifact-private-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com/'
     const actions: string[] = [], uploads: number[] = []
@@ -266,10 +264,9 @@ describe('voice delivery', () => {
       listener = handler
       return () => {}
     } } as unknown as EvenAppBridge
-    const storageError = vi.fn()
     const chat = new DeviceChat(owner, async () => 'fixture', () => {})
     await chat.refresh()
-    const recorder = await startRecording(bridge, storageError)
+    const recorder = await startRecording(bridge)
     const feed = (bytes: Uint8Array) => listener({ audioEvent: { audioPcm: bytes } } as EvenHubEvent)
     try {
       // One host frame crosses each 15-second boundary, including a split PCM sample.
@@ -283,33 +280,25 @@ describe('voice delivery', () => {
       }
       feed(new Uint8Array([carry[0], 213, 47]))
       const draft = (await recorder.stop())!
-      expect(storageError).not.toHaveBeenCalled()
       expect(draft.fileCount).toBe(2)
       expect(actions).toHaveLength(0)
       await expect(chat.sendVoice(thread, draft)).rejects.toThrow('503')
       await expect(chat.sendVoice(thread, draft)).resolves.toBe('sent')
       expect(uploads).toEqual([0, 1, 1])
       expect(actions.filter(action => action === 'send_chat_message')).toHaveLength(1)
-    } finally { await recorder.recording.discard(); chat.close() }
+    } finally { chat.close() }
   })
 
-  it('restores the original file and event IDs of a pending send saved before segmented capture', async () => {
-    const owner = identity(), thread = crypto.randomUUID()
-    const receipt = { clientEventId: crypto.randomUUID(), fileId: crypto.randomUUID() }
-    const account = JSON.stringify([API_BASE_URL, owner.userId, owner.orgId])
-    await set([account, thread, 'pending'], receipt, createStore('okou-g2-device', 'chat'))
-    const store = new DeviceStore(owner)
-    expect(await store.pending(thread)).toEqual({ clientEventId: receipt.clientEventId, fileIds: [receipt.fileId] })
-    await store.acknowledge(thread, receipt.clientEventId)
-    expect(await store.pending(thread)).toBeUndefined()
-  })
-
-  it('keeps an accepted send working until its own event arrives and preserves a pre-context retry payload', async () => {
-    const owner = identity(), file = crypto.randomUUID(), event = crypto.randomUUID(), run = crypto.randomUUID()
-    const account = JSON.stringify([API_BASE_URL, owner.userId, owner.orgId])
+  it('keeps an accepted send working until its own event arrives and reconciles a promoted server event without a second send', async () => {
+    const audio = new RecordedVoice()
+    audio.append(new ArrayBuffer(4))
+    const owner = identity(), file = crypto.randomUUID(), event = audio.clientEventId, run = crypto.randomUUID()
+    const upload = 'https://user-artifact-private-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com/voice'
+    const inputs: string[] = []
     let thread = '', state = initialChat
     const rows: ChatEventRow[] = []
     vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      if (url === upload) return new Response()
       const call = tool(url, init)
       if (call.name === 'create_chat_thread') {
         thread = String(call.arguments.clientThreadId)
@@ -317,15 +306,17 @@ describe('voice delivery', () => {
         return toolResult(init, { threadId: thread })
       }
       if (call.name === 'get_chat_messages') return page(init, rows.filter(r => r.seqId > Number(call.arguments.sinceSeqId ?? 0)), rows.at(-1))
+      if (call.name === 'prepare_voice_upload') return toolResult(init, { id: file, uploadUrl: upload })
+      if (call.name === 'complete_voice_upload') return toolResult(init, { id: file })
       expect(call.name).toBe('send_chat_message')
-      expect(call.arguments.userMessage).toEqual({ version: 1, parts: [{ type: 'voice', clips: [{ fileId: file }] }] })
+      inputs.push(String(call.arguments.clientEventId))
       return toolResult(init, { threadId: thread, eventId: event })
     })
     const chat = new DeviceChat(owner, async () => 'fixture', s => { state = s })
     try {
       await chat.refresh()
-      await set([account, thread, 'pending'], { fileIds: [file], clientEventId: event }, createStore('okou-g2-device', 'chat'))
-      await chat.retryPending()
+      expect(await chat.sendVoice(thread, audio)).toBe('sent')
+      expect(await chat.sendVoice(thread, audio)).toBe('sent')
       rows.push(row(thread, 2, { eventType: 'usage.recorded' }))
       await chat.refresh()
       expect(state).toMatchObject({ working: true, pending: false, reply: { text: 'Previous reply' } })
@@ -335,10 +326,12 @@ describe('voice delivery', () => {
       rows.push(row(thread, 4, { runId: run, eventType: 'run.completed' }))
       await chat.refresh()
       expect(state).toMatchObject({ working: false, task: null, reply: { text: 'Previous reply' } })
+      expect(await chat.sendVoice(thread, audio)).toBe('sent')
+      expect(inputs).toEqual([event])
     } finally { chat.close() }
   })
 
-  it('retries the exact send after a lost response and reconciles the promoted input on reopening', async () => {
+  it('retries the exact send after a lost response in the same launch and rebuilds from server events on reopening', async () => {
     const owner = identity(), file = crypto.randomUUID()
     const uploadUrl = 'https://user-artifact-private-prod.98b0b14cee451004596479a689d2071b.r2.cloudflarestorage.com/clip'
     let thread = '', uploads = 0, rows: ChatEventRow[] = []
@@ -376,12 +369,12 @@ describe('voice delivery', () => {
     try {
       await chat.refresh()
       const wav = new RecordedVoice()
-      await wav.finish(new ArrayBuffer(4))
+      wav.append(new ArrayBuffer(4))
       await expect(chat.sendVoice(thread, wav)).resolves.toBe('pending')
-      await chat.refresh(); chat.close(); chat = open(); await chat.refresh()
+      await chat.refresh()
       expect(state.pending).toBe(true)
       expect(sends).toHaveLength(1)
-      expect(sends[0]).toEqual({ threadId: thread, clientEventId: expect.any(String),
+      expect(sends[0]).toEqual({ threadId: thread, clientEventId: wav.clientEventId,
         userMessage: { version: 1, parts: [{ type: 'voice', clips: [{ fileId: file }] },
           { type: 'additional_info', text: LENS_CONTEXT }] } })
       await chat.retryPending()
@@ -389,6 +382,10 @@ describe('voice delivery', () => {
       expect(uploads).toBe(1)
       rows = [row(thread, 2, { eventType: 'input.prompt', revokesEventId: String(sends[0].clientEventId) }),
         row(thread, 3, { payload: { content: 'The reply' } })]
+      chat.close()
+      chat = open()
+      await chat.refresh()
+      await chat.retryPending()
       vi.mocked(watchThread).mock.calls.at(-1)![3]()
       await chat.refresh()
       expect(state.pending).toBe(false)

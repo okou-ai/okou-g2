@@ -18,8 +18,6 @@ export interface LensView {
 type Stage = 'quiet' | 'reader' | 'starting' | 'recording' | 'stopping' | 'review' | 'sending'
 type Voice = (target: string, audio: RecordedVoice) => Promise<'sent' | 'pending'>
 
-const readKey = (thread: string) => 'okou.g2.last-read.' + thread
-
 export class LensController {
   private view: LensView = { thread: null, reply: null, working: false, task: null, status: '', canRecord: false, pending: false }
   private stage: Stage = 'quiet'
@@ -66,8 +64,6 @@ export class LensController {
     if (view.pending) this.menu = null
     if (changedThread) {
       this.readSeq = 0
-      try { if (view.thread) this.readSeq = Number(localStorage.getItem(readKey(view.thread))) || 0 }
-      catch { /* Use the in-memory cursor when browser storage is unavailable. */ }
       this.reset('quiet')
     }
     if (changedReply) {
@@ -91,17 +87,12 @@ export class LensController {
     this.reset('quiet')
   }
 
-  private discard(clip: RecordedVoice | null) {
-    if (clip) void clip.discard().catch(() => this.onError('Could not clear the recording from local storage'))
-  }
-
   private reset(next: 'quiet' | 'reader') {
     this.revision++
     if (this.recorder) {
       this.micCleanup = this.recorder.cancel().catch(() => this.onError('Could not close the microphone'))
     }
     this.recorder = null
-    this.discard(this.clip)
     this.clip = null
     this.menu = null
     this.stage = next
@@ -204,7 +195,7 @@ export class LensController {
   }
 
   private async tap() {
-    if (this.stage === 'recording') return this.finishRecording(true)
+    if (this.stage === 'recording') return this.finishRecording()
     if (this.stage === 'review') return this.sendClip()
     if (this.stage === 'quiet') { this.showReader(); return }
     if (this.stage !== 'reader') return
@@ -217,16 +208,12 @@ export class LensController {
     // that microphone before a new capture is allowed to open it again.
     this.micCleanup = this.micCleanup.then(async () => {
       if (version !== this.revision) return
-      const onStorageFailure = () => {
-        if (version === this.revision) void this.finishRecording(false)
-      }
-      const recorder = await startRecording(this.bridge, onStorageFailure, () => {
+      const recorder = await startRecording(this.bridge, () => {
         if (this.stage === 'recording') this.draw()
       })
       if (version !== this.revision) { await recorder.cancel(); return }
       this.recorder = recorder
       this.stage = 'recording'
-      if (recorder.recording.storageFailed) onStorageFailure()
     }).catch(() => {
       if (version === this.revision) {
         this.onError('Microphone unavailable')
@@ -237,7 +224,7 @@ export class LensController {
     this.draw()
   }
 
-  private async finishRecording(send: boolean) {
+  private async finishRecording() {
     const recorder = this.recorder
     if (!recorder || this.stage !== 'recording') return
     const version = this.revision
@@ -248,14 +235,12 @@ export class LensController {
       const stopped = recorder.stop()
       this.micCleanup = stopped.then(() => undefined, () => undefined)
       const audio = await stopped
-      if (version !== this.revision) { await audio?.discard(); return }
+      if (version !== this.revision) return
       if (!audio) { this.showReader('No audio captured') }
       else {
         this.clip = audio
         this.stage = 'review'
-        if (send) return this.sendClip()
-        this.note = 'Storage unavailable'
-        this.onError('Recording stopped because local storage is unavailable. Tap to send the captured audio.')
+        return this.sendClip()
       }
     } catch {
       if (version === this.revision) { this.showReader('Recording failed') }
@@ -280,8 +265,6 @@ export class LensController {
       this.onError(error instanceof Error ? error.message : 'Send failed')
       this.note = 'Send failed'
       this.stage = 'review'
-    } finally {
-      if (this.clip !== clip) this.discard(clip)
     }
     this.draw()
   }
@@ -355,8 +338,6 @@ export class LensController {
       if (page.mode === 'reader' && !page.menu && this.stage === 'reader' && !this.menu &&
           thread && this.view.thread === thread && reply && reply.seqId > this.readSeq && this.view.reply?.id === reply.id) {
         this.readSeq = reply.seqId
-        try { localStorage.setItem(readKey(thread), String(this.readSeq)) }
-        catch { /* The in-memory cursor still applies to this session. */ }
       }
     }).catch((error: Error) => {
       this.lastPage = ''

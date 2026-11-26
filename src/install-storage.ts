@@ -23,28 +23,9 @@ export async function exclusive<T>(name: string, work: () => Promise<T>): Promis
   try { return await pending } finally { if (queues.get(name) === pending) queues.delete(name) }
 }
 
-export function installation(storage: InstallStorage, create: true): Promise<string>
-export function installation(storage: InstallStorage, create: false): Promise<string | undefined>
-export async function installation(storage: InstallStorage, create: boolean): Promise<string | undefined> {
-  const stored = await storage.getLocalStorage(installKey)
-  if (validShare.test(stored)) return stored
-  if (!create) {
-    if (stored) throw new Error('Unreadable Even App installation')
-    return
-  }
-  return exclusive(installKey, async () => {
-    const existing = await storage.getLocalStorage(installKey)
-    if (validShare.test(existing)) return existing
-    const seed = base64url.encode(crypto.getRandomValues(new Uint8Array(32)))
-    await put(storage, installKey, seed)
-    return seed
-  })
-}
-
 // Two overlapping opens selecting the same missing binding must submit the same
 // UUID, including when they belong to different loopback origins.
-export async function newThreadId(storage: InstallStorage, account: string, replaced?: string): Promise<string> {
-  const seed = await installation(storage, true)
+export async function newThreadId(seed: string, account: string, replaced?: string): Promise<string> {
   const input = encoder.encode(JSON.stringify(['ai.okou.g2/thread/v1', seed, account, replaced ?? null]))
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', input)).subarray(0, 16)
   bytes[6] = (bytes[6] & 15) | 0x80 // RFC 9562, application-defined UUIDv8
@@ -53,7 +34,7 @@ export async function newThreadId(storage: InstallStorage, account: string, repl
   return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-')
 }
 
-export function sessionHandle(): string | undefined {
+function legacyHandle(): string | undefined {
   try {
     const cookie = document.cookie.split(';').map((item) => item.trim()).find((item) => item.startsWith(cookieName + '='))
     const handle = cookie?.slice(cookieName.length + 1)
@@ -61,14 +42,6 @@ export function sessionHandle(): string | undefined {
   } catch {
     return undefined
   }
-}
-
-function setHandle(handle?: string) {
-  // First-party host cookies span the ephemeral Even Hub ports. This random
-  // share cannot authorize API requests or decrypt the package record by itself.
-  document.cookie = cookieName + '=' + (handle ?? '') + '; Path=/; SameSite=Strict; Max-Age=' +
-    (handle ? 365 * 24 * 3600 : 0) + (location.protocol === 'https:' ? '; Secure' : '')
-  if (sessionHandle() !== handle) throw new Error('Even App could not persist the install session')
 }
 
 async function grantSlot(handle: string) {
@@ -85,46 +58,41 @@ async function wrappingKey(seed: string, handle: string) {
 
 export interface Grant { refreshToken: string; deviceHash: string }
 
-export async function readGrant(storage: InstallStorage, seed: string, handle: string): Promise<Grant | undefined> {
-  const value = await storage.getLocalStorage(await grantSlot(handle))
-  if (!value) return
+export const grantKey = 'okou.g2.grant.v2.' + DEVICE_CLIENT_ID
+
+export function parseGrant(raw: string): Grant | undefined {
+  if (!raw || raw === 'null') return
+  const grant = JSON.parse(raw) as Grant
+  if (typeof grant?.refreshToken !== 'string' || !grant.refreshToken || typeof grant.deviceHash !== 'string' || !grant.deviceHash) {
+    throw new Error('Unreadable G2 sign-in')
+  }
+  return grant
+}
+
+// Up to 0.4.17, unlocking the existing package record required a cookie share.
+// Read it only during upgrade. Fresh installations use the native store alone.
+export async function migrateGrant(storage: InstallStorage): Promise<string> {
+  const seed = await storage.getLocalStorage(installKey)
+  if (!validShare.test(seed)) return ''
+  const handle = legacyHandle()
+  if (!handle) return ''
+  const slot = await grantSlot(handle)
+  const value = await storage.getLocalStorage(slot)
+  if (!value) return ''
+  let grant: Grant | undefined
   try {
     const [iv, ciphertext] = value.split('.')
     const key = await wrappingKey(seed, handle)
     const bytes = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: decode(iv) }, key, decode(ciphertext))
-    const data = JSON.parse(new TextDecoder().decode(bytes)) as Grant
-    if (typeof data.refreshToken === 'string' && data.refreshToken && typeof data.deviceHash === 'string') return data
-  } catch {
-    // An unreadable record still permits a fresh interactive device sign-in.
-  }
-}
-
-export async function writeGrant(storage: InstallStorage, grant: Grant, expected: string | undefined, refresh: boolean) {
-  const seed = await installation(storage, true)
-  const handle = refresh && expected ? expected : base64url.encode(crypto.getRandomValues(new Uint8Array(32)))
-  const key = await wrappingKey(seed, handle)
-  const slot = await grantSlot(handle)
-  const iv = crypto.getRandomValues(new Uint8Array(12))
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoder.encode(JSON.stringify(grant)))
-  if (sessionHandle() !== expected) throw new Error('Install session changed')
-  await put(storage, slot, base64url.encode(iv) + '.' + base64url.encode(new Uint8Array(ciphertext)))
-  try {
-    if (sessionHandle() !== expected) throw new Error('Install session changed')
-    setHandle(handle)
-  } catch (error) {
-    if (sessionHandle() !== handle) await put(storage, slot, '').catch(() => undefined)
-    throw error
-  }
-  if (expected && handle !== expected) await put(storage, await grantSlot(expected), '').catch(() => undefined)
-}
-
-export async function clearGrant(storage: InstallStorage, handle: string | undefined) {
-  if (sessionHandle() !== handle) return
-  try {
-    if (handle) setHandle()
-  } finally {
-    if (handle) await put(storage, await grantSlot(handle), '')
-    // Once the package has a marker, an old origin cannot revive a legacy grant on sign-out.
-    await installation(storage, true)
-  }
+    grant = parseGrant(new TextDecoder().decode(bytes))
+  } catch { return '' }
+  if (!grant) return ''
+  const current = await storage.getLocalStorage(grantKey)
+  if (current) return current
+  const raw = JSON.stringify(grant)
+  await put(storage, grantKey, raw)
+  await put(storage, slot, '')
+  await put(storage, installKey, '')
+  document.cookie = cookieName + '=; Path=/; SameSite=Strict; Max-Age=0'
+  return raw
 }

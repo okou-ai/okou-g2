@@ -18,13 +18,12 @@ function toBytes(pcm: unknown): Uint8Array | null {
 }
 
 export interface Recorder {
-  readonly recording: RecordedVoice
   readonly seconds: number
   stop(): Promise<RecordedVoice | null>
   cancel(): Promise<void>
 }
 
-export async function startRecording(bridge: EvenAppBridge, onStorageFailure: () => void, onSecond?: () => void): Promise<Recorder> {
+export async function startRecording(bridge: EvenAppBridge, onSecond?: () => void): Promise<Recorder> {
   const recording = new RecordedVoice()
   let buffer = new Uint8Array(PCM_SEGMENT_BYTES)
   let used = 0
@@ -39,7 +38,7 @@ export async function startRecording(bridge: EvenAppBridge, onStorageFailure: ()
       used += count
       offset += count
       if (used === buffer.length) {
-        recording.saveSegment(buffer.buffer, onStorageFailure)
+        recording.append(buffer.buffer)
         buffer = new Uint8Array(PCM_SEGMENT_BYTES)
         used = 0
       }
@@ -55,7 +54,6 @@ export async function startRecording(bridge: EvenAppBridge, onStorageFailure: ()
     if (!await bridge.audioControl(true, AudioInputSource.Glasses)) throw new Error('The glasses microphone did not start')
   } catch (error) {
     unsubscribe()
-    await recording.discard()
     throw error
   }
 
@@ -64,22 +62,12 @@ export async function startRecording(bridge: EvenAppBridge, onStorageFailure: ()
     if (!await bridge.audioControl(false)) throw new Error('Could not close the microphone')
   }
   return {
-    recording,
     get seconds() { return seconds },
     async stop() {
-      try {
-        await closeMic()
-        await recording.finish(buffer.buffer.slice(0, used - used % 2))
-        if (recording.fileCount) return recording
-      } catch (error) {
-        await recording.discard()
-        throw error
-      }
-      return null
+      await closeMic()
+      recording.append(buffer.buffer.slice(0, used - used % 2))
+      return recording.fileCount ? recording : null
     },
-    async cancel() {
-      try { await closeMic() }
-      finally { await recording.discard() }
-    },
+    cancel: closeMic,
   }
 }

@@ -1,15 +1,12 @@
-import 'fake-indexeddb/auto'
-import { clear, createStore, get } from 'idb-keyval'
 import { UnsecuredJWT } from 'jose'
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { CHAT_SCOPES, DEVICE_CLIENT_ID, DEVICE_SCOPE, MCP_URL, OAUTH_ISSUER } from '../config'
 import { InstalledGrant } from '../installed-grant'
 
-const store = createStore('okou-g2-auth', 'grants')
+import { host } from './install-fixture'
 const access = new UnsecuredJWT({ sub: 'user_fixture', org_id: 'org_fixture', client_id: DEVICE_CLIENT_ID, aud: MCP_URL, scope: DEVICE_SCOPE })
   .setExpirationTime('1h').encode()
 const grant = (refresh_token?: string) => Response.json({ access_token: access, token_type: 'Bearer', refresh_token })
-beforeEach(() => clear(store))
 afterEach(() => vi.unstubAllGlobals())
 
 it('starts at the issuer from a static package and distinguishes pending approval', async () => {
@@ -31,6 +28,7 @@ it('starts at the issuer from a static package and distinguishes pending approva
 })
 
 it('restores chat with an existing MCP grant and requests consent if its audience is incompatible', async () => {
+  const installed = host()
   const response = (aud: string | string[] | undefined, scopes = CHAT_SCOPES) => {
     const jwt = new UnsecuredJWT({ aud, sub: 'user_fixture', org_id: 'org_fixture',
       client_id: DEVICE_CLIENT_ID, scp: scopes }).setExpirationTime('1h').encode()
@@ -40,32 +38,29 @@ it('restores chat with an existing MCP grant and requests consent if its audienc
     .mockResolvedValueOnce(response([MCP_URL])).mockResolvedValueOnce(response('https://other.example'))
     .mockResolvedValueOnce(response(['https://other.example'])).mockResolvedValueOnce(response(undefined, ['user:org:read', 'okou:chat:read']))
   vi.stubGlobal('fetch', fetch)
-  await new InstalledGrant().token('fixture')
-  expect(await new InstalledGrant().refresh()).toMatchObject({ userId: 'user_fixture' })
-  await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'mcp_grant_required', status: 401 })
-  await expect(new InstalledGrant().token('new-code')).rejects.toMatchObject({
+  await new InstalledGrant(installed.open).token('fixture')
+  expect(await new InstalledGrant(installed.open).refresh()).toMatchObject({ userId: 'user_fixture' })
+  await expect(new InstalledGrant(installed.open).refresh()).rejects.toMatchObject({ code: 'mcp_grant_required', status: 401 })
+  await expect(new InstalledGrant(installed.open).token('new-code')).rejects.toMatchObject({
     code: 'mcp_grant_incomplete', message: expect.stringContaining('different resource'),
   })
-  await expect(new InstalledGrant().token('another-code')).rejects.toMatchObject({
+  await expect(new InstalledGrant(installed.open).token('another-code')).rejects.toMatchObject({
     code: 'mcp_grant_incomplete', message: expect.stringContaining('okou:chat:send'),
   })
 })
 
-it('restores a sealed rotating grant after a reload and revokes the latest credential on sign-out', async () => {
+it('restores a rotating native grant after a reload and revokes the latest credential on sign-out', async () => {
+  const installed = host()
   const fetch = vi.fn(async (_url: string, _init: RequestInit) => Response.json({}))
   fetch.mockResolvedValueOnce(grant('first-fixture')).mockResolvedValueOnce(grant('next-fixture'))
     .mockResolvedValueOnce(grant()).mockResolvedValueOnce(new Response(null, { status: 200 }))
   vi.stubGlobal('fetch', fetch)
-  expect(await new InstalledGrant().token('fixture')).toMatchObject({ userId: 'user_fixture', orgId: 'org_fixture' })
-  const saved = await get(DEVICE_CLIENT_ID, store)
-  expect(saved.key.extractable).toBe(false)
-  expect(saved.ciphertext.byteLength).toBeGreaterThan(0)
-  expect(JSON.stringify(saved)).not.toContain('first-fixture')
-  const reopened = new InstalledGrant()
+  expect(await new InstalledGrant(installed.open).token('fixture')).toMatchObject({ userId: 'user_fixture', orgId: 'org_fixture' })
+  const reopened = new InstalledGrant(installed.open)
   await reopened.refresh()
   await reopened.token('fixture')
   await reopened.logout()
-  await expect(new InstalledGrant().refresh()).rejects.toMatchObject({ code: 'signed_out' })
+  await expect(new InstalledGrant(installed.open).refresh()).rejects.toMatchObject({ code: 'signed_out' })
   const forms = fetch.mock.calls.map(([, init]) => Object.fromEntries(new URLSearchParams(String(init.body))))
   expect(forms[0]).toMatchObject({ resource: MCP_URL })
   expect(forms[1]).toEqual({ client_id: DEVICE_CLIENT_ID, grant_type: 'refresh_token', refresh_token: 'first-fixture' })
@@ -73,5 +68,4 @@ it('restores a sealed rotating grant after a reload and revokes the latest crede
   expect(forms[3]).toMatchObject({ token: 'next-fixture', token_type_hint: 'refresh_token' })
   expect(forms[3]).not.toHaveProperty('resource')
   expect(fetch.mock.calls[3][0]).toBe(OAUTH_ISSUER + '/oauth/token/revoke')
-  expect(await get(DEVICE_CLIENT_ID, store)).toBeUndefined()
 })

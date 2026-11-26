@@ -78,7 +78,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
   }, [])
 
   return <main>
-    <header><h1>Okou for Even G2</h1><p className="hint">Beta {version} · {describeConnection(glasses)}</p></header>
+    <header><h1>Okou for Even G2</h1><p className="hint">Version {version} · {describeConnection(glasses)}</p></header>
     {login.phase === 'loading' && <section className="card" role="status">Opening Okou…</section>}
     {login.phase === 'signed-out' && <section className="card">
       <h2>Connect your glasses</h2>

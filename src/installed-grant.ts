@@ -1,21 +1,12 @@
-import { createStore, del, get, set } from 'idb-keyval'
 import { DEVICE_CLIENT_ID, DEVICE_SCOPE, MCP_URL, OAUTH_ISSUER } from './config'
 import { DEVICE_GRANT, McpConsentRequired, deviceCodeHash, parseDeviceCode, parseSession } from './device-protocol'
 import type { DeviceCode, DeviceSession } from './types'
 import { connectBridge } from './glasses'
-import { clearGrant, installation, readGrant, sessionHandle, writeGrant, type Grant, type InstallStorage } from './install-storage'
+import { grantKey, migrateGrant, parseGrant, put, type Grant, type InstallStorage } from './install-storage'
 
 export class AuthError extends Error {
   constructor(readonly code: string, readonly status: number, message = code) { super(message) }
 }
-
-interface SavedGrant extends Grant { handle?: string }
-interface SealedGrant {
-  key: CryptoKey
-  iv: Uint8Array<ArrayBuffer>
-  ciphertext: ArrayBuffer
-}
-const credentials = createStore('okou-g2-auth', 'grants')
 
 async function clerk(path: string, params: Record<string, string>) {
   const response = await fetch(OAUTH_ISSUER + path, {
@@ -32,13 +23,10 @@ async function clerk(path: string, params: Record<string, string>) {
 }
 
 export class InstalledGrant {
-  private memoryOnly?: SavedGrant
+  private memoryOnly?: { grant: Grant; previousSlot: string }
+  private revision = 0
 
   constructor(private readonly storage: () => Promise<InstallStorage | null> = connectBridge) {}
-
-  async hasInstalledSession() {
-    return !!await this.storage() && !!sessionHandle()
-  }
 
   async device() {
     const response = await clerk('/oauth/device_authorization', { scope: DEVICE_SCOPE, resource: MCP_URL })
@@ -49,79 +37,24 @@ export class InstalledGrant {
     }
   }
 
-  private async read(): Promise<SavedGrant | undefined> {
-    const storage = await this.storage()
-    if (this.memoryOnly && (!storage || this.memoryOnly.handle === sessionHandle())) return this.memoryOnly
+  private async slot(storage: InstallStorage | null): Promise<string> {
+    if (!storage) return ''
+    const raw = await storage.getLocalStorage(grantKey)
+    return raw || migrateGrant(storage)
+  }
+
+  private async read(): Promise<Grant | undefined> {
+    const raw = await this.slot(await this.storage())
+    if (this.memoryOnly?.previousSlot === raw) return this.memoryOnly.grant
     this.memoryOnly = undefined
-    if (storage) {
-      const seed = await installation(storage, false)
-      const handle = sessionHandle()
-      if (seed || handle) {
-        if (!seed || !handle) return
-        const grant = await readGrant(storage, seed, handle)
-        return grant && { ...grant, handle }
-      }
-    }
-    // Import a 0.4.3 grant only before this package has its own installation.
-    const sealed = await get<SealedGrant>(DEVICE_CLIENT_ID, credentials).catch(() => undefined)
-    if (!sealed) return
-    try {
-      const bytes = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.iv }, sealed.key, sealed.ciphertext)
-      const grant = JSON.parse(new TextDecoder().decode(bytes)) as Grant
-      if (typeof grant.refreshToken === 'string' && typeof grant.deviceHash === 'string') return grant
-    } catch {
-      // A WebView update may invalidate a stored CryptoKey.
-    }
-    await del(DEVICE_CLIENT_ID, credentials).catch(() => undefined)
+    try { return parseGrant(raw) } catch { return undefined }
   }
 
-  private async save(grant: Grant, storage: InstallStorage | null, expectedHandle?: string, previous?: SavedGrant): Promise<boolean> {
-    try {
-      if (storage) {
-        if (sessionHandle() !== expectedHandle) throw new AuthError('signed_out', 401)
-        if (previous?.handle && !this.memoryOnly) {
-          // A delayed successful response must not overwrite a grant another port has already rotated.
-          const latest = await this.read()
-          if (latest?.handle === previous.handle && latest.refreshToken !== previous.refreshToken) return true
-        }
-        await writeGrant(storage, grant, expectedHandle, !!previous?.handle)
-        this.memoryOnly = undefined
-        // Native credentials are now authoritative, even if the legacy database is later restored.
-        if (!previous?.handle) await del(DEVICE_CLIENT_ID, credentials).catch(() => undefined)
-        return true
-      }
-      const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
-      const iv = crypto.getRandomValues(new Uint8Array(12))
-      const bytes = new TextEncoder().encode(JSON.stringify(grant))
-      const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes)
-      await set(DEVICE_CLIENT_ID, { key, iv, ciphertext } satisfies SealedGrant, credentials)
-      this.memoryOnly = undefined
-      return true
-    } catch {
-      if (storage && sessionHandle() !== expectedHandle) {
-        this.memoryOnly = undefined
-        throw new AuthError('signed_out', 401)
-      }
-      // The issuer has already consumed the device code or rotated this refresh token.
-      this.memoryOnly = { ...grant, handle: expectedHandle }
-      return false
-    }
-  }
-
-  private async forget(storage: InstallStorage | null, handle?: string) {
-    this.memoryOnly = undefined
-    if (storage) {
-      try { await clearGrant(storage, handle) }
-      finally { await del(DEVICE_CLIENT_ID, credentials).catch(() => undefined) }
-    } else {
-      await del(DEVICE_CLIENT_ID, credentials)
-    }
-  }
-
-  private async exchange(params: Record<string, string>, hash: string, previous?: SavedGrant, retry = true): Promise<DeviceSession> {
+  private async exchange(params: Record<string, string>, hash: string, previous?: Grant, retry = true): Promise<DeviceSession> {
+    const revision = this.revision
     const storage = await this.storage()
-    const expectedHandle = storage ? sessionHandle() : undefined
-    if (previous?.handle && previous.handle !== expectedHandle) throw new AuthError('signed_out', 401)
+    const original = await this.slot(storage)
+    if (previous && !this.memoryOnly && parseGrant(original)?.deviceHash !== hash) throw new AuthError('signed_out', 401)
     let response: Response
     try {
       response = await clerk('/oauth/token', params)
@@ -148,8 +81,25 @@ export class InstalledGrant {
     }
     const token = body.refresh_token ?? previous?.refreshToken
     if (typeof token !== 'string' || !token) throw new AuthError('offline_grant_required', 401)
-    const persisted = await this.save({ refreshToken: token, deviceHash: hash }, storage, expectedHandle, previous)
-    return persisted ? session : { ...session, temporary: true }
+    const grant = { refreshToken: token, deviceHash: hash }
+    if (revision !== this.revision) throw new AuthError('signed_out', 401)
+    if (storage) {
+      try {
+        const current = await this.slot(storage)
+        if (current !== original) {
+          if (previous && parseGrant(current)?.deviceHash === hash) return session
+          throw new AuthError('signed_out', 401)
+        }
+        await put(storage, grantKey, JSON.stringify(grant))
+        this.memoryOnly = undefined
+        return session
+      } catch (error) {
+        if (error instanceof AuthError) throw error
+        // The issuer already consumed the code or rotated the token. Keep this session usable.
+      }
+    }
+    this.memoryOnly = { grant, previousSlot: original }
+    return { ...session, temporary: true }
   }
 
   async token(deviceCode: string) {
@@ -160,7 +110,7 @@ export class InstalledGrant {
     return this.exchange({ grant_type: DEVICE_GRANT, device_code: deviceCode, resource: MCP_URL }, hash)
   }
 
-  private renew(grant: SavedGrant, retry = true): Promise<DeviceSession> {
+  private renew(grant: Grant, retry = true): Promise<DeviceSession> {
     // Omitting resource on refresh inherits the original Clerk grant, including a device grant without aud.
     return this.exchange({ grant_type: 'refresh_token', refresh_token: grant.refreshToken }, grant.deviceHash, grant, retry)
   }
@@ -173,14 +123,17 @@ export class InstalledGrant {
 
   async logout() {
     const storage = await this.storage()
-    const handle = storage ? sessionHandle() : undefined
-    let saved: SavedGrant | undefined
+    this.revision++
+    let saved: Grant | undefined
     try {
-      try { saved = await this.read() }
-      finally { await this.forget(storage, handle) }
+      saved = await this.read()
     } finally {
-      if (saved && (!storage || saved.handle === handle)) {
-        await clerk('/oauth/token/revoke', { token: saved.refreshToken, token_type_hint: 'refresh_token' })
+      this.memoryOnly = undefined
+      try {
+        // An explicit empty grant also prevents importing a superseded legacy login.
+        if (storage) await put(storage, grantKey, 'null')
+      } finally {
+        if (saved) await clerk('/oauth/token/revoke', { token: saved.refreshToken, token_type_hint: 'refresh_token' })
       }
     }
   }
