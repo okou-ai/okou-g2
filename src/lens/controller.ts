@@ -1,12 +1,14 @@
 import { OsEventTypeList as Gesture, type EvenAppBridge, type EvenHubEvent } from '@evenrealities/even_hub_sdk'
+import { getTextWidth } from '@evenrealities/pretext'
 import type { RecordedVoice } from './recording'
 import { startRecording, type Recorder } from './audio'
-import type { LensMessage, TaskTarget } from './messages'
+import type { LensReply, TaskTarget } from './messages'
 import { indicatorUpdate, listeningLabel, statusUpdate, startupPage, lensPage, menuItems, paginate, type LensPage, type Menu } from './screens'
 
 export interface LensView {
   thread: string | null
-  messages: readonly LensMessage[]
+  reply: LensReply | null
+  working: boolean
   task: TaskTarget | null
   status: string
   canRecord: boolean
@@ -19,13 +21,12 @@ type Voice = (target: string, audio: RecordedVoice) => Promise<'sent' | 'pending
 const readKey = (thread: string) => 'okou.g2.last-read.' + thread
 
 export class LensController {
-  private view: LensView = { thread: null, messages: [], task: null, status: '', canRecord: false, pending: false }
+  private view: LensView = { thread: null, reply: null, working: false, task: null, status: '', canRecord: false, pending: false }
   private stage: Stage = 'quiet'
   private menu: { kind: Menu; task?: TaskTarget | null } | null = null
   private readSeq = 0
   private pages: string[] = ['']
   private pageIndex = 0
-  private sentAfter: number | null = null
   private note = ''
   private recorder: Recorder | null = null
   private clip: RecordedVoice | null = null
@@ -59,21 +60,19 @@ export class LensController {
 
   update(view: LensView) {
     const changedThread = view.thread !== this.view.thread
-    const previous = this.view.messages.at(-1)
-    const latest = view.messages.at(-1)
+    const { reply } = view
+    const changedReply = changedThread || reply?.id !== this.view.reply?.id || reply?.text !== this.view.reply?.text
     this.view = view
     if (changedThread) {
       this.readSeq = 0
       try { if (view.thread) this.readSeq = Number(localStorage.getItem(readKey(view.thread))) || 0 }
       catch { /* Use the in-memory cursor when browser storage is unavailable. */ }
-      this.sentAfter = null
       this.reset('quiet')
     }
-    if (changedThread || latest?.id !== previous?.id || latest?.text !== previous?.text) {
+    if (changedReply) {
       this.pageIndex = 0
-      this.pages = latest?.role === 'assistant' ? paginate(latest.text) : ['']
+      this.pages = reply ? paginate(reply.text) : ['']
       if (this.stage === 'reader') this.note = ''
-      if (latest && this.sentAfter !== null && latest.seqId > this.sentAfter) this.sentAfter = null
     }
     this.draw()
   }
@@ -258,7 +257,7 @@ export class LensController {
         this.clip = audio
         this.stage = 'review'
         if (send) return this.sendClip()
-        this.note = 'Storage unavailable · tap to send'
+        this.note = 'Storage unavailable'
         this.onError('Recording stopped because local storage is unavailable. Tap to send the captured audio.')
       }
     } catch {
@@ -272,14 +271,12 @@ export class LensController {
     const version = this.revision
     const clip = this.clip
     this.clip = null // The send owns the staged PCM until all WAVs have uploaded.
-    const lastSeqId = this.view.messages.at(-1)?.seqId ?? 0
     this.stage = 'sending'
     this.draw()
     try {
-      const result = await this.send(this.view.thread, clip)
+      await this.send(this.view.thread, clip)
       if (version !== this.revision) return
-      if (result === 'sent' && (this.view.messages.at(-1)?.seqId ?? 0) <= lastSeqId) this.sentAfter = lastSeqId
-      this.showReader(result === 'pending' ? 'Checking delivery…' : '')
+      this.showReader()
     } catch (error) {
       if (version !== this.revision) return
       this.clip = clip
@@ -293,35 +290,40 @@ export class LensController {
   }
 
   private page(): LensPage {
-    const latest = this.view.messages.at(-1)
     const mode = this.stage === 'reader' || this.stage === 'quiet' ? this.stage : 'voice'
-    const lastReply = this.view.messages.findLast(message => message.role === 'assistant')
-    const working = this.view.task !== null || this.sentAfter !== null
-    const unread = (lastReply?.seqId ?? 0) > this.readSeq
+    const working = this.view.working || this.view.pending || this.stage === 'stopping' || this.stage === 'sending'
+    const unread = (this.view.reply?.seqId ?? 0) > this.readSeq
     const indicator = working ? 'working' : unread && (mode !== 'reader' || this.menu) ? 'unread' : 'off'
-    let body = '', status = '', hint = ''
+    const body = mode === 'quiet' ? '' : this.pages[this.pageIndex]
+    let status = '', primaryHint = '', secondaryHint = ''
     switch (this.stage) {
       case 'quiet': break
       case 'reader':
-        if (working || latest?.role === 'user') status = '● Thinking'
-        if (latest?.role === 'assistant') body = this.pages[this.pageIndex]
-        else if (!status) body = this.note || this.view.status
-        hint = this.view.canRecord && !this.view.pending ? 'Hold: menu · Tap to speak' : 'Hold: menu · Tap to refresh'
+        if (this.view.pending) status = '● Sending'
+        else if (working) status = '● Working'
+        else status = this.note || this.view.status
+        primaryHint = this.view.canRecord && !this.view.pending ? 'Tap to speak' : 'Tap to refresh'
+        secondaryHint = 'Hold: menu'
         break
-      case 'starting': hint = 'Double-tap: discard'; break
+      case 'starting': secondaryHint = 'Double-tap: discard'; break
       case 'recording':
-        status = listeningLabel(this.recorder!.seconds)
-        hint = 'Hold: menu · Tap: send · Double-tap: discard'
-        break
-      case 'stopping': status = '● Sending'; hint = 'Double-tap: discard'; break
-      case 'sending': status = '● Sending'; hint = 'Double-tap: launcher'; break
       case 'review':
-        body = this.note || 'Recording ready'
-        hint = 'Hold: menu · Tap: send · Double-tap: discard'
+        if (this.stage === 'recording') status = listeningLabel(this.recorder!.seconds)
+        else status = this.note || 'Recording ready'
+        primaryHint = 'Tap to send'
+        secondaryHint = 'Hold: menu · Double-tap: discard'
+        break
+      case 'stopping':
+      case 'sending':
+        status = '● Sending'
+        secondaryHint = this.stage === 'sending' ? 'Double-tap: launcher' : 'Double-tap: discard'
         break
     }
-    if (this.menu) hint = 'Swipe: choose · Tap: select · Double-tap: back'
-    return { mode, menu: this.menu?.kind ?? null, body, status, hint, indicator }
+    if (this.menu) {
+      primaryHint = 'Tap to select'
+      secondaryHint = 'Swipe: choose · Double-tap: back'
+    }
+    return { mode, menu: this.menu?.kind ?? null, body, status, primaryHint, secondaryHint, indicator }
   }
 
   private animateWork(enabled: boolean) {
@@ -334,14 +336,14 @@ export class LensController {
     this.renderQueue = this.renderQueue.then(async () => {
       if (this.closed || !this.active) return
       const page = this.page()
-      const key = JSON.stringify([page.menu, page.mode, page.body, !!page.status, page.hint])
+      const key = JSON.stringify([page.menu, page.mode, page.body, getTextWidth(page.status), page.primaryHint, page.secondaryHint])
       // PCM crosses one whole second per phase: bright for one second, dim
       // for one second. No callbacks run just to animate an idle WebView.
       const recording = this.stage === 'recording' && !!this.recorder
-      this.animateWork(!recording && (page.indicator === 'working' || !!page.status))
+      this.animateWork(!recording && page.indicator === 'working')
       const dim = recording ? this.recorder!.seconds % 2 === 1 : this.dim
       const level = page.status || page.indicator !== 'off' ? (dim ? 2 : 4) : 0
-      const thread = this.view.thread, latest = this.view.messages.at(-1)
+      const { thread, reply } = this.view
       if (key !== this.lastPage) {
         if (!await this.bridge.rebuildPageContainer(lensPage(page, level))) throw new Error('Could not update the G2 display')
         this.lastPage = key
@@ -354,9 +356,8 @@ export class LensController {
       this.lastDotLevel = level
       if (this.closed || !this.active) return
       if (page.mode === 'reader' && !page.menu && this.stage === 'reader' && !this.menu &&
-          thread && this.view.thread === thread && latest?.role === 'assistant' && latest.seqId > this.readSeq &&
-          this.view.messages.at(-1)?.id === latest.id && this.sentAfter === null) {
-        this.readSeq = latest.seqId
+          thread && this.view.thread === thread && reply && reply.seqId > this.readSeq && this.view.reply?.id === reply.id) {
+        this.readSeq = reply.seqId
         try { localStorage.setItem(readKey(thread), String(this.readSeq)) }
         catch { /* The in-memory cursor still applies to this session. */ }
       }

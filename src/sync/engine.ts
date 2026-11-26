@@ -1,14 +1,17 @@
 import { ApiError, OkouApiClient, type TokenProvider } from '../api/client'
 import { requireCancellationGrant } from '../device-protocol'
 import { DeviceStore, type Pending } from '../store'
-import type { ChatEventRow, Identity } from '../types'
+import type { Identity } from '../types'
 import type { RecordedVoice } from '../lens/recording'
-import { currentTask, type TaskTarget } from '../lens/messages'
+import { LENS_CONTEXT } from '../lens/display'
+import type { LensReply, TaskTarget } from '../lens/messages'
 import { readHistory, type History } from './messages'
 
 export interface ChatState {
   thread: string | null
-  rows: readonly ChatEventRow[]
+  reply: LensReply | null
+  task: TaskTarget | null
+  working: boolean
   live: boolean
   syncing: boolean
   pending: boolean
@@ -16,7 +19,7 @@ export interface ChatState {
 }
 
 export const initialChat: ChatState = {
-  thread: null, rows: [], live: false, syncing: false, pending: false, error: null,
+  thread: null, reply: null, task: null, working: false, live: false, syncing: false, pending: false, error: null,
 }
 
 export class DeviceChat {
@@ -25,6 +28,7 @@ export class DeviceChat {
   private readonly api: OkouApiClient
   private readonly store: DeviceStore
   private history: History | null = null
+  private acceptedInput: string | null = null
   private unwatch?: () => void
   private refreshing: Promise<void> | null = null
   private dirty = false
@@ -49,9 +53,10 @@ export class DeviceChat {
     if (id === this.state.thread) return
     this.unwatch?.()
     this.history = null
+    this.acceptedInput = null
     const pending = !!await this.store.pending(id)
     this.abort.signal.throwIfAborted()
-    this.publish({ thread: id, rows: [], pending, live: false })
+    this.publish({ thread: id, reply: null, task: null, working: false, pending, live: false })
     // Opening the reader does not depend on loading or connecting Ably.
     void import('./realtime').then(({ watchThread }) => {
       if (this.abort.signal.aborted || this.state.thread !== id) return
@@ -82,7 +87,7 @@ export class DeviceChat {
         const pending = await this.store.pending(id)
         let history
         try {
-          history = await readHistory(this.api, id, this.history, pending?.clientEventId)
+          history = await readHistory(this.api, id, this.history)
         } catch (error) {
           // get_chat_messages checks thread ownership before returning history. A missing
           // transport endpoint or expired cursor must never allocate another conversation.
@@ -94,9 +99,12 @@ export class DeviceChat {
           throw error
         }
         this.abort.signal.throwIfAborted()
-        if (history.acknowledged && pending) await this.store.acknowledge(id, pending.clientEventId)
         this.history = history
-        this.publish({ rows: history.rows, pending: !!await this.store.pending(id), error: null })
+        if (pending && this.observedInput(pending.clientEventId)) await this.store.acknowledge(id, pending.clientEventId)
+        const stillPending = !!await this.store.pending(id)
+        if (this.acceptedInput && this.observedInput(this.acceptedInput)) this.acceptedInput = null
+        this.publish({ reply: history.reply, task: history.task, working: history.working || !!this.acceptedInput,
+          pending: stillPending, error: null })
       }
     } catch (error) {
       this.publish({ error: error instanceof Error ? error.message : 'Could not read the conversation' })
@@ -108,13 +116,20 @@ export class DeviceChat {
     if (this.state.thread !== thread) throw new Error('The conversation changed. Record again.')
   }
 
+  private observedInput(id: string) {
+    return this.history?.facts.some(row => row.id === id || row.revokesEventId === id)
+  }
+
   private async submit(thread: string, pending: Pending, token: string, firstAttempt: boolean): Promise<'sent' | 'pending'> {
     const { fileIds, clientEventId } = pending
     this.publish({ pending: true })
     try {
       const reply = await this.api.call<{ threadId: string; eventId: string }>('send_chat_message', {
         threadId: thread, clientEventId,
-        userMessage: { version: 1, parts: fileIds.map(fileId => ({ type: 'voice', clips: [{ fileId }] })) },
+        userMessage: { version: 1, parts: [
+          ...fileIds.map(fileId => ({ type: 'voice', clips: [{ fileId }] })),
+          ...(pending.additionalInfo ? [{ type: 'additional_info', text: pending.additionalInfo }] : []),
+        ] },
       }, token)
       if (reply.threadId !== thread || reply.eventId !== clientEventId) return 'pending'
     } catch (error) {
@@ -126,14 +141,17 @@ export class DeviceChat {
       throw error
     }
     await this.store.acknowledge(thread, clientEventId)
-    this.publish({ pending: false })
+    if (this.state.thread === thread) {
+      this.acceptedInput = this.observedInput(clientEventId) ? null : clientEventId
+      this.publish({ pending: false, working: !!this.acceptedInput || !!this.history?.working })
+    }
     return 'sent'
   }
 
   async cancelTask(thread: string, target: TaskTarget) {
     const token = await this.api.getToken()
     this.assertTarget(thread)
-    const active = currentTask(this.state.rows)
+    const active = this.state.task
     if (active?.id !== target.id || active.kind !== target.kind) return
     requireCancellationGrant(token)
     try {
@@ -163,7 +181,7 @@ export class DeviceChat {
       }
       const token = await this.api.getToken()
       this.assertTarget(thread)
-      const pending = await this.store.reserveSend(thread, fileIds)
+      const pending = await this.store.reserveSend(thread, fileIds, LENS_CONTEXT)
       try { this.assertTarget(thread) } catch (error) {
         await this.store.acknowledge(thread, pending.clientEventId)
         throw error

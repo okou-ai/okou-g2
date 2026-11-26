@@ -9,6 +9,7 @@ type Binding = { id: string; ready: boolean }
 export interface Pending {
   clientEventId: string
   fileIds: string[]
+  additionalInfo?: string
 }
 type StoredPending = Pending | { clientEventId: string; fileId: string }
 const database = createStore('okou-g2-device', 'chat')
@@ -63,8 +64,8 @@ export class DeviceStore {
     return 'fileIds' in saved ? saved : { clientEventId: saved.clientEventId, fileIds: [saved.fileId] }
   }
 
-  async reserveSend(thread: string, fileIds: string[]): Promise<Pending> {
-    const pending = { clientEventId: crypto.randomUUID(), fileIds }
+  async reserveSend(thread: string, fileIds: string[], additionalInfo: string): Promise<Pending> {
+    const pending = { clientEventId: crypto.randomUUID(), fileIds, additionalInfo }
     await update<StoredPending>(this.pendingKey(thread), (current) => {
       if (current) throw new Error('The previous send is awaiting confirmation')
       return pending

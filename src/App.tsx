@@ -1,9 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { version } from '../app.json'
 import { DeviceAuth } from './auth'
 import { connectBridge, describeConnection, initialGlassesState, onDeviceStatus } from './glasses'
 import { LensController, type LensView } from './lens/controller'
-import { currentTask, toLensMessages } from './lens/messages'
 import { DeviceChat, initialChat } from './sync/engine'
 
 export default function App({ auth }: { auth: DeviceAuth }) {
@@ -14,8 +13,6 @@ export default function App({ auth }: { auth: DeviceAuth }) {
   const controller = useRef<LensController | null>(null)
   const [chat, setChat] = useState(initialChat)
   const [glasses, setGlasses] = useState(initialGlassesState)
-  const messages = useMemo(() => toLensMessages(chat.rows), [chat.rows])
-  const task = useMemo(() => currentTask(chat.rows), [chat.rows])
 
   useLayoutEffect(() => {
     setChat(initialChat)
@@ -41,9 +38,10 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     : login.phase !== 'ready' ? 'Sign in on your phone'
     : chat.error ? 'Sync failed · tap to retry'
     : !chat.thread ? 'Opening conversation…'
-    : chat.syncing && !messages.length ? 'Loading messages…' : ''
-  const view: LensView = { thread: userId ? chat.thread : null, messages: userId ? messages : [],
-    task: userId ? task : null, status, pending: chat.pending, canRecord: !!userId && !!chat.thread && !chat.error }
+    : chat.syncing && !chat.reply && !chat.working ? 'Loading messages…' : ''
+  const view: LensView = { thread: userId ? chat.thread : null, reply: userId ? chat.reply : null,
+    task: userId ? chat.task : null, working: !!userId && chat.working, status,
+    pending: !!userId && chat.pending, canRecord: !!userId && !!chat.thread && !chat.error }
   const currentView = useRef(view)
   useLayoutEffect(() => {
     currentView.current = view
@@ -79,7 +77,6 @@ export default function App({ auth }: { auth: DeviceAuth }) {
     return () => { disposed = true; detach?.(); lens?.close(); controller.current = null }
   }, [])
 
-  const lastReply = messages.findLast((m) => m.role === 'assistant')
   return <main>
     <header><h1>Okou for Even G2</h1><p className="hint">Beta {version} · {describeConnection(glasses)}</p></header>
     {login.phase === 'loading' && <section className="card" role="status">Opening Okou…</section>}
@@ -110,7 +107,7 @@ export default function App({ auth }: { auth: DeviceAuth }) {
         {chat.error && <p className="error" role="alert">{chat.error}</p>}
         {chat.pending && <button onClick={() => void engine.current?.retryPending().catch((error: Error) =>
           setGlasses((state) => ({ ...state, error: error.message })))}>Retry the same voice message</button>}
-        {lastReply && <p className="reply">{lastReply.text}</p>}
+        {chat.reply && <p className="reply">{chat.reply.text}</p>}
         <button className="link" disabled={chat.syncing} onClick={() => void engine.current?.refresh()}>
           {chat.syncing ? 'Refreshing…' : 'Refresh conversation'}
         </button>

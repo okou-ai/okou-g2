@@ -16,6 +16,7 @@
   "type": "module",
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.15",
+    "@evenrealities/pretext": "^0.1.4",
     "ably": "^2.28.0",
     "idb-keyval": "^6.3.0",
     "jose": "^6.2.12",

@@ -2,6 +2,8 @@ import {
   CreateStartUpPageContainer, ListContainerProperty, ListItemContainerProperty,
   RebuildPageContainer, TextContainerProperty, TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk'
+import { getTextWidth } from '@evenrealities/pretext'
+import { LENS_HEIGHT, LENS_WIDTH, LINE_CELLS, PAGE_LINES } from './display'
 
 export type LensMode = 'quiet' | 'reader' | 'voice'
 export type Menu = 'reader' | 'voice'
@@ -11,7 +13,8 @@ export interface LensPage {
   menu: Menu | null
   body: string
   status: string
-  hint: string
+  primaryHint: string
+  secondaryHint: string
   indicator: Indicator
 }
 
@@ -46,9 +49,13 @@ export function indicatorUpdate(level: number) {
 }
 
 const VOICE = { containerID: 4, containerName: 'voice-status' }
+// The native font has proportional ASCII numerals. Its full-width numerals keep
+// both the label and the right edge of the clock stationary on every tick.
+const clockNumber = new Intl.NumberFormat('en', {
+  numberingSystem: 'fullwide', minimumIntegerDigits: 2, useGrouping: false,
+})
 export function listeningLabel(seconds: number) {
-  const minutes = String(Math.floor(seconds / 60)).padStart(2, '0')
-  return '● Listening ' + minutes + ':' + String(seconds % 60).padStart(2, '0')
+  return '● Listening ' + clockNumber.format(Math.floor(seconds / 60)) + ':' + clockNumber.format(seconds % 60)
 }
 export function statusUpdate(content: string, level: number) {
   return new TextContainerUpgrade({ ...VOICE, content, textColor: level })
@@ -56,17 +63,27 @@ export function statusUpdate(content: string, level: number) {
 
 function layout(page: LensPage, level: number) {
   const boxes: TextContainerProperty[] = []
-  if (page.mode !== 'quiet') boxes.push(text(2, 'title', 'OKOU', 4, 0, 320, 34))
+  const lineHeight = 27
+  const footerY = LENS_HEIGHT - lineHeight
+  if (page.mode !== 'quiet') boxes.push(text(2, 'title', 'OKOU', 0, 0, getTextWidth('OKOU'), lineHeight))
   if (page.status) {
-    const status = text(VOICE.containerID, VOICE.containerName, page.status, 356, 0, 220, 34)
+    const width = getTextWidth(page.status)
+    const status = text(VOICE.containerID, VOICE.containerName, page.status, LENS_WIDTH - width, 0, width, lineHeight)
     status.textColor = level
     boxes.push(status)
   } else {
-    const dot = text(DOT.containerID, DOT.containerName, page.indicator === 'off' ? '' : DOT_GLYPH, 548, 0, 28, 34)
+    const width = getTextWidth(DOT_GLYPH)
+    const dot = text(DOT.containerID, DOT.containerName, page.indicator === 'off' ? '' : DOT_GLYPH, LENS_WIDTH - width, 0, width, lineHeight)
     dot.textColor = level
     boxes.push(dot)
   }
-  if (page.hint) boxes.push(text(6, 'gesture-hint', page.hint, 4, 254, 568, 34))
+  if (page.primaryHint) {
+    boxes.push(text(6, 'primary-hint', page.primaryHint, 0, footerY, getTextWidth(page.primaryHint), lineHeight))
+  }
+  if (page.secondaryHint) {
+    const width = getTextWidth(page.secondaryHint)
+    boxes.push(text(7, 'secondary-hint', page.secondaryHint, LENS_WIDTH - width, footerY, width, lineHeight))
+  }
   if (page.menu) {
     const items = menuItems(page.menu)
     const list = new ListContainerProperty({
@@ -83,7 +100,7 @@ function layout(page: LensPage, level: number) {
 }
 
 export const startupPage = () => new CreateStartUpPageContainer(layout({
-  mode: 'quiet', menu: null, body: '', status: '', hint: '', indicator: 'off',
+  mode: 'quiet', menu: null, body: '', status: '', primaryHint: '', secondaryHint: '', indicator: 'off',
 }, 4))
 
 export const lensPage = (page: LensPage, level: number) => new RebuildPageContainer(layout(page, level))
@@ -94,7 +111,7 @@ export function paginate(text: string): string[] {
   const pages: string[] = []
   let page = '', lines = 1, width = 0
   const newLine = (explicit: boolean) => {
-    if (lines === 7) {
+    if (lines === PAGE_LINES) {
       pages.push(page)
       page = ''
       lines = 1
@@ -110,7 +127,7 @@ export function paginate(text: string): string[] {
   for (const char of segments) {
     if (char === '\n') { newLine(true); continue }
     const cells = char === '\t' ? 4 : char.codePointAt(0)! >= 0x1100 ? 2 : 1
-    if (width + cells > 36) newLine(false)
+    if (width + cells > LINE_CELLS) newLine(false)
     page += char === '\t' ? '    ' : char
     width += cells
   }

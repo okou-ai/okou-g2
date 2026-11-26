@@ -7,6 +7,7 @@ import { API_BASE_URL, CHAT_SCOPES, DEVICE_SCOPE, MCP_URL } from '../config'
 import { DeviceStore } from '../store'
 import { DeviceChat, initialChat, type ChatState } from '../sync/engine'
 import { startRecording } from '../lens/audio'
+import { LENS_CONTEXT } from '../lens/display'
 import type { EvenAppBridge, EvenHubEvent } from '@evenrealities/even_hub_sdk'
 import { RecordedVoice, PCM_SEGMENT_BYTES } from '../lens/recording'
 import { readHistory } from '../sync/messages'
@@ -113,7 +114,10 @@ describe('single-thread reader', () => {
       expect(call.arguments).toMatchObject({ threadId: id, sinceSeqId: 19, sinceEventId: b.id })
       return page(init, [], b)
     })
-    expect(await readHistory(api(), id, null, pending)).toMatchObject({ rows: [a, b], acknowledged: true })
+    const history = await readHistory(api(), id, null)
+    expect(history.reply).toEqual({ id: a.id, seqId: 12, text: 'Hello' })
+    expect(history.task).toEqual({ kind: 'event', id: b.id })
+    expect(history.facts.at(-1)?.revokesEventId).toBe(pending)
   })
 
   it('renews an unavailable signed archive and keeps the snapshot cursor when history was compacted', async () => {
@@ -126,8 +130,34 @@ describe('single-thread reader', () => {
       expect(call.arguments.sinceSeqId).toBeUndefined()
       return page(init, [], history, false, { url: signed + ++pointers, lastEventId: history.id, lastSeqId: 1 })
     })
-    expect((await readHistory(api(), id, null)).rows).toEqual([history])
+    expect((await readHistory(api(), id, null)).reply).toEqual({ id: history.id, seqId: 1, text: 'Hello' })
     expect(pointers).toBe(2)
+  })
+
+  it('keeps the last assistant text beyond 200 events and resolves a queued input recalled after compaction', async () => {
+    const id = crypto.randomUUID(), a = row(id, 1), b = row(id, 2, { payload: { content: '**Second**' } })
+    const queued = Array.from({ length: 250 }, (_, i) => row(id, i + 3, { eventType: i === 249 ? 'input.prompt' : 'input.budget',
+      payload: { userMessage: { parts: [{ type: 'text', text: 'Private user prompt' }] } } }))
+    const signed = 'https://storage.example/archive', archive = [a, b, ...queued]
+    const tail: ChatEventRow[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      if (String(url) === signed) return new Response(archive.map(r => JSON.stringify(r)).join('\n') + '\n')
+      const from = tool(url, init).arguments.sinceSeqId
+      const end = tail.at(-1) ?? queued.at(-1)!
+      return page(init, tail.filter(r => r.seqId > Number(from ?? 0)), end, false,
+        from === undefined ? { url: signed, lastSeqId: queued.at(-1)!.seqId, lastEventId: queued.at(-1)!.id } : null)
+    })
+    const initial = await readHistory(api(), id, null)
+    expect(initial.reply?.text).toBe('Second')
+    expect(JSON.stringify(initial.facts)).not.toContain('Private user prompt')
+    expect(initial.task?.id).toBe(queued.at(-1)!.id)
+    tail.push(row(id, 253, { eventType: 'control.revoke', revokesEventId: queued.at(-1)!.id }),
+      row(id, 254, { eventType: 'output.error', payload: { error: 'System error' } }))
+    const recalled = await readHistory(api(), id, initial)
+    expect(recalled.reply).toEqual({ id: b.id, seqId: 2, text: 'Second' })
+    expect(recalled.task).toBeNull()
+    expect(recalled.working).toBe(false)
+    expect(recalled.cursor.lastEventId).toBe(tail[1].id)
   })
 
   it('reports a persistently blocked archive without skipping rows or reopening from zero', async () => {
@@ -148,7 +178,7 @@ describe('single-thread reader', () => {
         : page(init, [row(crypto.randomUUID(), 2)])
     })
     vi.stubGlobal('fetch', fetch)
-    await expect(readHistory(api(), id, { rows: [old], cursor: { lastSeqId: 1, lastEventId: old.id } })).rejects.toThrow('Invalid chat history')
+    await expect(readHistory(api(), id, { facts: [], reply: null, task: null, working: false, cursor: { lastSeqId: 1, lastEventId: old.id } })).rejects.toThrow('Invalid chat history')
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 })
@@ -226,7 +256,9 @@ describe('voice delivery', () => {
       }
       if (name === 'complete_voice_upload') return toolResult(init, { id: args.id })
       expect(name).toBe('send_chat_message')
-      expect(args.userMessage).toEqual({ version: 1, parts: files.map(fileId => ({ type: 'voice', clips: [{ fileId }] })) })
+      expect(args.userMessage).toEqual({ version: 1, parts: [
+        ...files.map(fileId => ({ type: 'voice', clips: [{ fileId }] })), { type: 'additional_info', text: LENS_CONTEXT },
+      ] })
       return toolResult(init, { threadId: thread, eventId: args.clientEventId })
     })
     let listener!: (event: EvenHubEvent) => void
@@ -270,6 +302,40 @@ describe('voice delivery', () => {
     expect(await store.pending(thread)).toEqual({ clientEventId: receipt.clientEventId, fileIds: [receipt.fileId] })
     await store.acknowledge(thread, receipt.clientEventId)
     expect(await store.pending(thread)).toBeUndefined()
+  })
+
+  it('keeps an accepted send working until its own event arrives and preserves a pre-context retry payload', async () => {
+    const owner = identity(), file = crypto.randomUUID(), event = crypto.randomUUID(), run = crypto.randomUUID()
+    const account = JSON.stringify([API_BASE_URL, owner.userId, owner.orgId])
+    let thread = '', state = initialChat
+    const rows: ChatEventRow[] = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      const call = tool(url, init)
+      if (call.name === 'create_chat_thread') {
+        thread = String(call.arguments.clientThreadId)
+        rows.push(row(thread, 1, { payload: { content: 'Previous reply' } }))
+        return toolResult(init, { threadId: thread })
+      }
+      if (call.name === 'get_chat_messages') return page(init, rows.filter(r => r.seqId > Number(call.arguments.sinceSeqId ?? 0)), rows.at(-1))
+      expect(call.name).toBe('send_chat_message')
+      expect(call.arguments.userMessage).toEqual({ version: 1, parts: [{ type: 'voice', clips: [{ fileId: file }] }] })
+      return toolResult(init, { threadId: thread, eventId: event })
+    })
+    const chat = new DeviceChat(owner, async () => 'fixture', s => { state = s })
+    try {
+      await chat.refresh()
+      await set([account, thread, 'pending'], { fileIds: [file], clientEventId: event }, createStore('okou-g2-device', 'chat'))
+      await chat.retryPending()
+      rows.push(row(thread, 2, { eventType: 'usage.recorded' }))
+      await chat.refresh()
+      expect(state).toMatchObject({ working: true, pending: false, reply: { text: 'Previous reply' } })
+      rows.push(row(thread, 3, { runId: run, eventType: 'input.prompt', revokesEventId: event }))
+      await chat.refresh()
+      expect(state.task).toEqual({ kind: 'run', id: run })
+      rows.push(row(thread, 4, { runId: run, eventType: 'run.completed' }))
+      await chat.refresh()
+      expect(state).toMatchObject({ working: false, task: null, reply: { text: 'Previous reply' } })
+    } finally { chat.close() }
   })
 
   it('retries the exact send after a lost response and reconciles the promoted input on reopening', async () => {
@@ -316,7 +382,8 @@ describe('voice delivery', () => {
       expect(state.pending).toBe(true)
       expect(sends).toHaveLength(1)
       expect(sends[0]).toEqual({ threadId: thread, clientEventId: expect.any(String),
-        userMessage: { version: 1, parts: [{ type: 'voice', clips: [{ fileId: file }] }] } })
+        userMessage: { version: 1, parts: [{ type: 'voice', clips: [{ fileId: file }] },
+          { type: 'additional_info', text: LENS_CONTEXT }] } })
       await chat.retryPending()
       expect(sends).toEqual([sends[0], sends[0]])
       expect(uploads).toBe(1)
@@ -325,7 +392,7 @@ describe('voice delivery', () => {
       vi.mocked(watchThread).mock.calls.at(-1)![3]()
       await chat.refresh()
       expect(state.pending).toBe(false)
-      expect(state.rows.at(-1)?.payload?.content).toBe('The reply')
+      expect(state.reply?.text).toBe('The reply')
       expect(sends).toHaveLength(2)
     } finally { chat.close() }
   })
