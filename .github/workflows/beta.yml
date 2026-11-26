@@ -1,0 +1,81 @@
+name: Even Hub Beta
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: even-hub-beta
+  queue: max
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Set the package and client version
+        id: version
+        run: |
+          base=$(jq -er .version app.json)
+          version="${base%.*}.$(( ${base##*.} + GITHUB_RUN_NUMBER ))"
+          jq --arg version "$version" '.version = $version' app.json > "$RUNNER_TEMP/app.json"
+          mv "$RUNNER_TEMP/app.json" app.json
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Look for this run's package on retry
+        if: github.run_attempt > 1
+        id: prior
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          stored=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?name=okou-g2-$VERSION.ehpk" \
+            --jq 'any(.artifacts[]; .expired == false)')
+          echo "found=$stored" >> "$GITHUB_OUTPUT"
+      - name: Test and pack
+        if: steps.prior.outputs.found != 'true'
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run pack:release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.prior.outputs.found != 'true'
+        with:
+          path: build/okou-g2-${{ steps.version.outputs.version }}.ehpk
+          if-no-files-found: error
+          archive: false
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: okou-g2-${{ needs.build.outputs.version }}.ehpk
+          path: build
+          github-token: ${{ github.token }}
+      - name: Upload, promote and verify
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          EVENHUB_CREDENTIALS: ${{ secrets.EVENHUB_CREDENTIALS }}
+        run: npm run publish:beta -- "$VERSION"

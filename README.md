@@ -6,7 +6,7 @@ Speak to a dedicated Okou conversation from Even G2 glasses and read replies on 
 
 Use the Even Hub Beta package for all product validation on the glasses. Accept the tester invitation, then open **Me → Beta tester → Okou → Install** in the Even Realities app using the invited account. Open Okou from the glasses launcher. [Even Hub Beta testing](https://hub.evenrealities.com/docs/test/beta-testing)
 
-To install your own build with the developer account, open **Even Hub → Me → Apps → Private builds** on the phone and launch it from there. Private builds support brief background use. Use the Beta tester installation for the five-minute locked-phone check. Even Hub shows the version for each channel. [Even Hub developer installation](https://hub.evenrealities.com/docs/test/private-testing)
+For a development build you upload manually, open **Even Hub → Me → Apps → Private builds** on the phone and launch it from there. Private builds support brief background use. Releases from `main` appear under **Beta tester** after promotion. Use that installation for the five-minute locked-phone check. [Even Hub developer installation](https://hub.evenrealities.com/docs/test/private-testing)
 
 The installed Beta requests a device code directly from Clerk. If this step fails, version 0.4.3 and later show the build, WebView origin and any available HTTP status on the phone. After approval, version 0.4.5 opens the conversation through the public Okou MCP endpoint. If the WebView cannot reach this endpoint, the phone displays its origin for diagnosing CORS.
 
@@ -46,22 +46,20 @@ npm run dev
 
 The development command builds the frontend and serves it with the Worker at `http://localhost:5173` for local debugging.
 
-## Release the developer build and Beta
+## Release a Beta
 
-Commit G2 changes directly to `main` and push them. Every release updates both Even Hub install paths from that commit. Select two unused numeric versions with the higher one in `app.json` for Beta. The portal requires unique versions and moves a promoted build out of the Private builds list.
+Every push to `main` runs the **Even Hub Beta** GitHub Actions workflow. It adds the workflow run number to the patch version in `app.json` in the build checkout. With the baseline `0.4.27`, run 1 ships `0.4.28`. Both the app and its package read that same version. Rerunning a release keeps its version.
 
-In a clean checkout of the pushed revision, install the locked dependencies and verify it. Pass the developer version to the release command. For example, with Beta `0.4.17` in `app.json`, run:
+After typechecking and tests pass, the workflow builds one `.ehpk` and saves it as a run artifact. It uploads that file to Even Hub, downloads the version to compare its bytes, promotes it to Beta and reads back the channel. To retry an interrupted publication, use **Re-run failed jobs**. The publish job reuses the original artifact, checks any existing upload and keeps a newer Beta in place.
+
+Set up the `EVENHUB_CREDENTIALS` repository Actions secret once using the Even Hub account that owns `ai.okou.g2`:
 
 ```sh
-npm ci
-npm run typecheck
-npm test
-npm run pack:release -- 0.4.16
+npx --yes --package=@evenrealities/evenhub-cli@0.2.0 evenhub login
+gh secret set EVENHUB_CREDENTIALS --repo okou-ai/okou-g2 < "${XDG_CONFIG_HOME:-$HOME/.config}/evenhub/credentials.yaml"
 ```
 
-The command checks the revision against remote `main`, builds the client once, and packs the same `dist` files twice. Only the outer manifest version differs. Both phone screens show the client version from `app.json`.
-
-Upload both files from `build/` to the Okou project, leave the developer version in Private builds, and promote the Beta version. Refresh the portal and check both install lists. Compare each portal download with its local package and check the intended tester's invitation status.
+Repeat the login and replace the secret when its refresh token expires. [Even Hub CI authentication](https://hub.evenrealities.com/docs/cli/auth)
 
 For the session check, sign in, note the conversation ID, fully close the Even app and reopen the Beta on a different loopback port. Confirm it opens the same conversation and that an explicit sign-out persists after another reopen. Lock the phone for at least five minutes, then turn a page on the lens. For the voice check, send a recording and verify the reply.
 

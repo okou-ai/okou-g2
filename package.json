@@ -6,6 +6,7 @@
     "dev": "npm run build && wrangler dev --assets ./dist --port 5173",
     "build": "vite build",
     "pack:release": "node scripts/pack-release.mjs",
+    "publish:beta": "bash scripts/publish-beta.sh",
     "preview": "wrangler dev --assets ./dist",
     "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy",
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260919.1",
+    "@evenrealities/evenhub-cli": "0.2.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.1",
